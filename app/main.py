@@ -17,10 +17,11 @@ from . import db
 from .bot import (
     CATEGORY_EMOJI,
     build_application,
+    schedule_digest,
     schedule_event_reminder,
     schedule_reminder,
 )
-from .config import TELEGRAM_BOT_TOKEN
+from .config import DIGEST_TIME, TELEGRAM_BOT_TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,10 +49,16 @@ async def lifespan(app: FastAPI):
         for reminder in db.list_upcoming_events():
             if schedule_event_reminder(tg_app.job_queue, reminder):
                 events += 1
+
+        # Ежедневный утренний дайджест со списком напоминаний.
+        schedule_digest(tg_app.job_queue)
+
         logger.info(
-            "Телеграм-бот запущен (polling). Восстановлено: регулярных %d, событий %d",
+            "Телеграм-бот запущен (polling). Восстановлено: регулярных %d, событий %d. "
+            "Утренний дайджест в %s.",
             recurring,
             events,
+            DIGEST_TIME,
         )
     else:
         logger.warning("TELEGRAM_BOT_TOKEN не задан — бот не запущен, работает только дашборд.")

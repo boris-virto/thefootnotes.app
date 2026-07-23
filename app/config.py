@@ -19,6 +19,13 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Belgrade")
 _allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
 ALLOWED_USER_IDS = {int(x) for x in _allowed.split(",") if x.strip()} if _allowed else set()
 
+# Утренний дайджест: во сколько слать список напоминаний (HH:MM в TIMEZONE).
+DIGEST_TIME = os.getenv("DIGEST_TIME", "09:00")
+# Куда слать дайджест. Обычно не нужно: если пусто и chat_id один — берётся он.
+# В личном чате Telegram chat_id совпадает с твоим user id.
+_digest_chat = os.getenv("DIGEST_CHAT_ID", "").strip()
+DIGEST_CHAT_ID = int(_digest_chat) if _digest_chat else None
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 FILES_DIR = DATA_DIR / "files"
 DB_PATH = DATA_DIR / "thefootnotes.db"

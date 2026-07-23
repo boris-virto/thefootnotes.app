@@ -21,7 +21,14 @@ from telegram.ext import (
 )
 
 from . import db, llm, transcribe
-from .config import FILES_DIR, TELEGRAM_BOT_TOKEN, TIMEZONE, user_allowed
+from .config import (
+    DIGEST_CHAT_ID,
+    DIGEST_TIME,
+    FILES_DIR,
+    TELEGRAM_BOT_TOKEN,
+    TIMEZONE,
+    user_allowed,
+)
 from .llm import ExtractedReminder
 
 logger = logging.getLogger(__name__)
@@ -157,6 +164,92 @@ def schedule_event_reminder(job_queue: JobQueue, reminder: db.Reminder) -> bool:
     return True
 
 
+# --- Утренний дайджест --------------------------------------------------------
+
+
+def _digest_line(reminder: db.Reminder, *, with_date: bool = True) -> str:
+    emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
+    line = f"{emoji} <b>{reminder.title}</b>"
+    if with_date and reminder.event_date:
+        line += f" — {reminder.event_date.strftime('%d.%m')}"
+    if reminder.event_time:
+        line += f" {reminder.event_time}"
+    if reminder.location:
+        line += f"\n   📍 {reminder.location}"
+    return line
+
+
+def _format_digest(reminders: list[db.Reminder], today) -> str | None:
+    """Собирает текст дайджеста, разбивая напоминания на секции по дате.
+    Возвращает None, если показывать нечего."""
+    overdue, todays, upcoming, undated = [], [], [], []
+    for r in reminders:
+        if r.event_date is None:
+            undated.append(r)
+        elif r.event_date < today:
+            overdue.append(r)
+        elif r.event_date == today:
+            todays.append(r)
+        else:
+            upcoming.append(r)
+    if not (overdue or todays or upcoming or undated):
+        return None
+
+    parts = [f"☀️ <b>Доброе утро!</b> Напоминания на {today.strftime('%d.%m.%Y')}"]
+    if todays:
+        parts.append("\n<b>📌 Сегодня:</b>")
+        parts += [_digest_line(r, with_date=False) for r in todays]
+    if overdue:
+        parts.append("\n<b>⚠️ Просрочено:</b>")
+        parts += [_digest_line(r) for r in sorted(overdue, key=lambda r: r.event_date)]
+    if upcoming:
+        parts.append("\n<b>🗓 Скоро:</b>")
+        parts += [_digest_line(r) for r in sorted(upcoming, key=lambda r: r.event_date)]
+    if undated:
+        parts.append("\n<b>📝 Без даты:</b>")
+        parts += [_digest_line(r, with_date=False) for r in undated]
+    return "\n".join(parts)
+
+
+async def _send_morning_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback ежедневной задачи: рассылает список актуальных напоминаний."""
+    reminders = await asyncio.to_thread(db.list_reminders)  # только невыполненные
+    if not reminders:
+        return
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+
+    # Кому и что слать.
+    if DIGEST_CHAT_ID is not None:
+        groups = {DIGEST_CHAT_ID: reminders}
+    else:
+        chat_ids = {r.chat_id for r in reminders if r.chat_id is not None}
+        if not chat_ids:
+            logger.info("Дайджест: некому слать (нет chat_id и DIGEST_CHAT_ID не задан).")
+            return
+        if len(chat_ids) == 1:
+            # Единственный адресат получает всё, включая старые записи без chat_id.
+            groups = {next(iter(chat_ids)): reminders}
+        else:
+            # Несколько чатов — каждому только его, чтобы не смешивать чужое.
+            groups = {cid: [r for r in reminders if r.chat_id == cid] for cid in chat_ids}
+
+    for chat_id, items in groups.items():
+        text = _format_digest(items, today)
+        if not text:
+            continue
+        try:
+            await context.bot.send_message(chat_id, text, parse_mode="HTML")
+        except Exception:
+            logger.exception("Не удалось отправить дайджест в чат %s", chat_id)
+
+
+def schedule_digest(job_queue: JobQueue) -> None:
+    """Ставит ежедневную задачу дайджеста на DIGEST_TIME (перепланировав старую)."""
+    for job in job_queue.get_jobs_by_name("digest"):
+        job.schedule_removal()
+    job_queue.run_daily(_send_morning_digest, time=_parse_time(DIGEST_TIME), name="digest")
+
+
 def _parse_date(value: str | None):
     if not value:
         return None
@@ -260,6 +353,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "скриншотом билета или PDF. Я разберу и сохраню.\n\n"
         "Могу напоминать регулярно — просто напиши «напоминать каждый понедельник в 9:00».\n\n"
         "Команды:\n/list — показать напоминания\n"
+        "/digest — утренний дайджест прямо сейчас\n"
         "/reminders — регулярные напоминания и выключатель\n"
         "/files — скачать сохранённые билеты и файлы"
     )
@@ -282,6 +376,16 @@ async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 line += f" {r.event_time}"
         blocks.append(line)
     await update.message.reply_text("\n".join(blocks), parse_mode="HTML")
+
+
+async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать дайджест прямо сейчас (тот же, что уходит утром)."""
+    if not await _guard(update):
+        return
+    reminders = await asyncio.to_thread(db.list_reminders)
+    today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    text = _format_digest(reminders, today) or "Пока нечего показать — список пуст 🙂"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -453,6 +557,7 @@ def build_application() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_cmd))
+    app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("reminders", reminders_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CallbackQueryHandler(on_stop_reminder, pattern=r"^stop:"))
