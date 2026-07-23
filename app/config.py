@@ -21,7 +21,7 @@ ALLOWED_USER_IDS = {int(x) for x in _allowed.split(",") if x.strip()} if _allowe
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 FILES_DIR = DATA_DIR / "files"
-DB_PATH = DATA_DIR / "remember.db"
+DB_PATH = DATA_DIR / "thefootnotes.db"
 
 # Адрес базы. По умолчанию SQLite-файл на диске.
 # Для переезда на Postgres: DATABASE_URL=postgresql+psycopg://user:pass@host:5432/dbname

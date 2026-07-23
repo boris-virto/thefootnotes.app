@@ -1,13 +1,13 @@
 # Деплой на VPS (Debian 13, Vultr) + авто-деплой через GitHub Actions
 
 Итог:
-- бот и дашборд — systemd-сервис под непривилегированным пользователем `remember` (с харденингом);
+- бот и дашборд — systemd-сервис под непривилегированным пользователем `thefootnotes` (с харденингом);
 - nginx отдаёт дашборд по HTTPS с паролем на `https://thefootnotes.app`;
-- данные (SQLite + файлы) лежат на диске в `/opt/remember_stuff/data` и не теряются;
+- данные (SQLite + файлы) лежат на диске в `/opt/thefootnotes/data` и не теряются;
 - каждый `git push` в `main` автоматически выкатывается на сервер.
 
-Значения-примеры: домен `thefootnotes.app`, путь `/opt/remember_stuff`, пользователь `remember`,
-репозиторий `github.com/USER/remember_stuff` (подставь свой).
+Значения-примеры: домен `thefootnotes.app`, путь `/opt/thefootnotes`, пользователь `thefootnotes`,
+репозиторий `github.com/USER/thefootnotes` (подставь свой).
 
 ---
 
@@ -25,6 +25,12 @@ IP сервера можно узнать на самом сервере: `curl 
 > `.app` — TLD из списка HSTS preload: браузеры работают с ним только по HTTPS. У нас HTTPS
 > настраивается через certbot (шаг 10), так что всё в порядке — просто plain-HTTP доступа не будет.
 
+> **Домен на Cloudflare?** Если A-запись стоит под проксёй (оранжевое облако), `ping thefootnotes.app`
+> покажет **IP Cloudflare**, а не твоего сервера — это нормально, а не ошибка. При этом меняются шаги
+> **8 (nginx)** и **10 (сертификат)**, а для авто-деплоя в `SSH_HOST` пойдёт сырой IP. Полностью
+> см. приложение [**«Cloudflare (оранжевое облако)»**](#cloudflare-оранжевое-облако) внизу — оно
+> заменяет шаги 8 и 10 и меняет секрет `SSH_HOST`.
+
 ---
 
 ## Часть 1. Разовая настройка сервера (под root)
@@ -36,39 +42,39 @@ apt update
 apt install -y git python3 python3-venv python3-pip nginx certbot python3-certbot-nginx apache2-utils
 ```
 
-### 2. Пользователь `remember`
+### 2. Пользователь `thefootnotes`
 
 Отдельный непривилегированный пользователь: под ним и работает сервис, и заходит деплой.
 
 ```bash
-useradd -m -d /home/remember -s /bin/bash remember
+useradd -m -d /home/thefootnotes -s /bin/bash thefootnotes
 ```
 
-### 3. Клонируем репозиторий в /opt/remember_stuff
+### 3. Клонируем репозиторий в /opt/thefootnotes
 
 ```bash
-mkdir -p /opt/remember_stuff
-chown remember:remember /opt/remember_stuff
+mkdir -p /opt/thefootnotes
+chown thefootnotes:thefootnotes /opt/thefootnotes
 # Публичный репозиторий — по https, без ключей:
-sudo -u remember git clone https://github.com/USER/remember_stuff.git /opt/remember_stuff
+sudo -u thefootnotes git clone https://github.com/USER/thefootnotes.git /opt/thefootnotes
 # (Если репозиторий приватный — см. раздел «Приватный репозиторий» внизу.)
 
 # Папка данных должна существовать до первого старта (из-за строгого харденинга):
-sudo -u remember mkdir -p /opt/remember_stuff/data/files
+sudo -u thefootnotes mkdir -p /opt/thefootnotes/data/files
 ```
 
 ### 4. Виртуальное окружение и зависимости
 
 ```bash
-sudo -u remember python3 -m venv /opt/remember_stuff/.venv
-sudo -u remember /opt/remember_stuff/.venv/bin/pip install --upgrade pip
-sudo -u remember /opt/remember_stuff/.venv/bin/pip install -r /opt/remember_stuff/requirements.txt
+sudo -u thefootnotes python3 -m venv /opt/thefootnotes/.venv
+sudo -u thefootnotes /opt/thefootnotes/.venv/bin/pip install --upgrade pip
+sudo -u thefootnotes /opt/thefootnotes/.venv/bin/pip install -r /opt/thefootnotes/requirements.txt
 ```
 
 ### 5. Файл .env с ключами
 
 ```bash
-sudo -u remember nano /opt/remember_stuff/.env
+sudo -u thefootnotes nano /opt/thefootnotes/.env
 ```
 
 Вставь (значения возьми из локального `.env`):
@@ -86,7 +92,7 @@ DATA_DIR=data
 Закрыть доступ:
 
 ```bash
-chmod 600 /opt/remember_stuff/.env
+chmod 600 /opt/thefootnotes/.env
 ```
 
 ### 6. Право рестартовать сервис без пароля (узкий sudo)
@@ -94,19 +100,19 @@ chmod 600 /opt/remember_stuff/.env
 Чтобы деплой мог перезапускать сервис, но не более того:
 
 ```bash
-echo 'remember ALL=(root) NOPASSWD: /usr/bin/systemctl restart remember-stuff' \
-  > /etc/sudoers.d/remember
-chmod 440 /etc/sudoers.d/remember
+echo 'thefootnotes ALL=(root) NOPASSWD: /usr/bin/systemctl restart thefootnotes' \
+  > /etc/sudoers.d/thefootnotes
+chmod 440 /etc/sudoers.d/thefootnotes
 ```
 
 ### 7. systemd-сервис
 
 ```bash
-cp /opt/remember_stuff/deploy/remember-stuff.service /etc/systemd/system/
+cp /opt/thefootnotes/deploy/thefootnotes.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now remember-stuff
-systemctl status remember-stuff --no-pager
-journalctl -u remember-stuff -n 30 --no-pager   # должно быть «Телеграм-бот запущен»
+systemctl enable --now thefootnotes
+systemctl status thefootnotes --no-pager
+journalctl -u thefootnotes -n 30 --no-pager   # должно быть «Телеграм-бот запущен»
 ```
 
 С этого момента **бот уже работает** — можно писать ему в Telegram.
@@ -114,8 +120,8 @@ journalctl -u remember-stuff -n 30 --no-pager   # должно быть «Тел
 ### 8. nginx
 
 ```bash
-cp /opt/remember_stuff/deploy/nginx-remember.conf /etc/nginx/sites-available/remember
-ln -sf /etc/nginx/sites-available/remember /etc/nginx/sites-enabled/remember
+cp /opt/thefootnotes/deploy/nginx-thefootnotes.conf /etc/nginx/sites-available/thefootnotes
+ln -sf /etc/nginx/sites-available/thefootnotes /etc/nginx/sites-enabled/thefootnotes
 ```
 
 > Дефолтный сайт nginx (`/etc/nginx/sites-enabled/default`) НЕ удаляем — если на сервере
@@ -124,7 +130,7 @@ ln -sf /etc/nginx/sites-available/remember /etc/nginx/sites-enabled/remember
 ### 9. Пароль на дашборд
 
 ```bash
-htpasswd -c /etc/nginx/.htpasswd-remember boris   # спросит и подтвердит пароль
+htpasswd -c /etc/nginx/.htpasswd-thefootnotes boris   # спросит и подтвердит пароль
 ```
 
 ### 10. HTTPS-сертификат
@@ -133,6 +139,9 @@ htpasswd -c /etc/nginx/.htpasswd-remember boris   # спросит и подтв
 nginx -t && systemctl reload nginx
 certbot --nginx -d thefootnotes.app    # спросит email и согласие; сам настроит 443 и редирект
 ```
+
+> **Cloudflare с проксёй?** Пропусти шаги 8 и 10 — они не сработают (certbot по HTTP-01 достучится
+> до Cloudflare, а не до nginx). Вместо них выполни приложение [«Cloudflare (оранжевое облако)»](#cloudflare-оранжевое-облако).
 
 ### 11. Файрвол, если включён ufw
 
@@ -155,17 +164,17 @@ Workflow уже лежит в `.github/workflows/deploy.yml`. Он при каж
 **На своём компе** создай отдельную пару ключей для CI:
 
 ```bash
-ssh-keygen -t ed25519 -f ~/.ssh/remember_deploy -N "" -C "github-actions-remember"
+ssh-keygen -t ed25519 -f ~/.ssh/thefootnotes_deploy -N "" -C "github-actions-thefootnotes"
 ```
 
-**Публичную** часть добавь пользователю `remember` на сервере:
+**Публичную** часть добавь пользователю `thefootnotes` на сервере:
 
 ```bash
-# скопируй содержимое ~/.ssh/remember_deploy.pub, затем на сервере:
-sudo -u remember mkdir -p /home/remember/.ssh
-sudo -u remember tee -a /home/remember/.ssh/authorized_keys   # вставь строку, Ctrl+D
-chmod 700 /home/remember/.ssh && chmod 600 /home/remember/.ssh/authorized_keys
-chown -R remember:remember /home/remember/.ssh
+# скопируй содержимое ~/.ssh/thefootnotes_deploy.pub, затем на сервере:
+sudo -u thefootnotes mkdir -p /home/thefootnotes/.ssh
+sudo -u thefootnotes tee -a /home/thefootnotes/.ssh/authorized_keys   # вставь строку, Ctrl+D
+chmod 700 /home/thefootnotes/.ssh && chmod 600 /home/thefootnotes/.ssh/authorized_keys
+chown -R thefootnotes:thefootnotes /home/thefootnotes/.ssh
 ```
 
 ### 2. Секреты в GitHub
@@ -174,9 +183,13 @@ chown -R remember:remember /home/remember/.ssh
 
 | Имя | Значение |
 |-----|----------|
-| `SSH_HOST` | `thefootnotes.app` |
-| `SSH_USER` | `remember` |
-| `SSH_KEY`  | содержимое **приватного** файла `~/.ssh/remember_deploy` (целиком) |
+| `SSH_HOST` | `thefootnotes.app` (**Cloudflare с проксёй → сырой IP сервера**, см. ниже) |
+| `SSH_USER` | `thefootnotes` |
+| `SSH_KEY`  | содержимое **приватного** файла `~/.ssh/thefootnotes_deploy` (целиком) |
+
+> **Cloudflare с проксёй?** Порт 22 (SSH) Cloudflare не проксирует — подключение к `thefootnotes.app:22`
+> уйдёт на edge Cloudflare и повиснет. Поэтому в `SSH_HOST` укажи **публичный IP сервера** (деплою домен
+> не нужен, ему надо просто достучаться до машины). Веб при этом остаётся под проксёй.
 
 ### 3. Готово
 
@@ -203,7 +216,7 @@ GitHub Actions сам зальёт на сервер и перезапустит
 
 1. Поставить Postgres на сервере, создать базу и пользователя.
 2. Добавить драйвер: `pip install "psycopg[binary]"` (и в `requirements.txt`).
-3. В `.env` прописать `DATABASE_URL=postgresql+psycopg://remember:пароль@localhost:5432/remember`.
+3. В `.env` прописать `DATABASE_URL=postgresql+psycopg://thefootnotes:пароль@localhost:5432/thefootnotes`.
 4. Для миграций схемы подключить Alembic (сейчас авто-миграция колонок работает только для SQLite).
 
 Старые данные из SQLite при желании перельём отдельным скриптом.
@@ -214,17 +227,81 @@ GitHub Actions сам зальёт на сервер и перезапустит
 
 Для `git pull` на сервере нужен read-only доступ к репозиторию:
 
-1. На сервере: `sudo -u remember ssh-keygen -t ed25519 -f /home/remember/.ssh/github -N ""`
-2. Содержимое `/home/remember/.ssh/github.pub` добавь в GitHub → репозиторий → Settings →
+1. На сервере: `sudo -u thefootnotes ssh-keygen -t ed25519 -f /home/thefootnotes/.ssh/github -N ""`
+2. Содержимое `/home/thefootnotes/.ssh/github.pub` добавь в GitHub → репозиторий → Settings →
    Deploy keys (read-only).
 3. Настрой git на использование этого ключа и клонируй по SSH:
-   `git@github.com:USER/remember_stuff.git`.
+   `git@github.com:USER/thefootnotes.git`.
+
+---
+
+## Cloudflare (оранжевое облако)
+
+Это приложение — для случая, когда домен управляется Cloudflare и A-запись `@` стоит **под проксёй
+(оранжевое облако)**. Оно **заменяет шаги 8 и 10** основной инструкции и меняет секрет `SSH_HOST`.
+Всё остальное (юзер, клон, venv, `.env`, sudo, systemd, htpasswd, ufw) делается как в основной части.
+
+Как это устроено: HTTPS для браузера обеспечивает сам Cloudflare (у edge есть сертификат на домен —
+и требование `.app` про обязательный HTTPS закрывается автоматически). Между Cloudflare и нашим
+сервером шифрование настраиваем через **Cloudflare Origin Certificate**. certbot не нужен.
+
+### CF-1. Режим SSL/TLS
+
+Cloudflare → **SSL/TLS → Overview** → выбери **Full (strict)**.
+
+> Не оставляй «Flexible»: origin будет редиректить на HTTPS, а Cloudflare ходить по HTTP — получится
+> бесконечный редирект.
+
+### CF-2. Origin-сертификат
+
+Cloudflare → **SSL/TLS → Origin Server → Create Certificate** → оставь настройки по умолчанию
+(RSA, срок 15 лет, hostnames `thefootnotes.app` и `*.thefootnotes.app`) → **Create**.
+
+Cloudflare покажет два блока — **Origin Certificate** и **Private Key**. Сохрани их на сервере:
+
+```bash
+mkdir -p /etc/ssl/cloudflare
+nano /etc/ssl/cloudflare/thefootnotes.pem   # вставь блок Origin Certificate
+nano /etc/ssl/cloudflare/thefootnotes.key   # вставь блок Private Key
+chmod 600 /etc/ssl/cloudflare/thefootnotes.key
+```
+
+### CF-3. nginx (замена шага 8)
+
+Используем готовый конфиг с блоком 443 и путями к origin-сертификату:
+
+```bash
+cp /opt/thefootnotes/deploy/nginx-thefootnotes-cloudflare.conf /etc/nginx/sites-available/thefootnotes
+ln -sf /etc/nginx/sites-available/thefootnotes /etc/nginx/sites-enabled/thefootnotes
+nginx -t && systemctl reload nginx
+```
+
+Шаг 10 (certbot) **пропускаем полностью** — сертификат уже на месте.
+
+### CF-4. Файрвол (опционально, но желательно)
+
+Раз весь веб-трафик идёт через Cloudflare, порты 80/443 можно открыть только для диапазонов
+Cloudflare, чтобы origin не дёргали напрямую. Актуальные диапазоны: <https://www.cloudflare.com/ips/>.
+Порт 22 при этом оставь открытым (нужен для деплоя). Если возиться не хочется — обычный
+`ufw allow 80,443` из шага 11 тоже работает.
+
+### CF-5. Секрет `SSH_HOST` = IP
+
+В GitHub-секретах (Часть 2, шаг 2) в `SSH_HOST` поставь **публичный IP сервера**, а не `thefootnotes.app`
+— Cloudflare не проксирует порт 22. Проверь со своего компа:
+
+```bash
+ssh -i ~/.ssh/thefootnotes_deploy thefootnotes@<IP-сервера> "echo ok"
+```
+
+**Проверка:** открой **https://thefootnotes.app** → логин/пароль из шага 9 → дашборд.
+В Cloudflare → SSL/TLS → Overview статус должен быть без ошибок сертификата origin.
 
 ---
 
 ## Полезное
 
-- Логи в реальном времени: `journalctl -u remember-stuff -f`
-- Ручной перезапуск: `systemctl restart remember-stuff`
-- Бэкап: скопировать `/opt/remember_stuff/data/`
+- Логи в реальном времени: `journalctl -u thefootnotes -f`
+- Ручной перезапуск: `systemctl restart thefootnotes`
+- Бэкап: скопировать `/opt/thefootnotes/data/`
 - Сертификат продлевается сам; проверить таймер: `systemctl list-timers | grep certbot`

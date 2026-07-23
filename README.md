@@ -1,4 +1,4 @@
-# remember_stuff
+# thefootnotes
 
 Телеграм-бот, который помогает не забывать всякие штуки. Кидаешь ему текст, голосовое,
 скриншот билета или PDF — он разбирает смысл через Claude, сохраняет структурированное
@@ -9,7 +9,7 @@
 - **Бот** — python-telegram-bot (текст / войс / фото / PDF)
 - **Транскрипция войсов** — OpenAI Whisper
 - **Разбор смысла и чтение билетов** — Claude (Anthropic), с поддержкой vision и PDF
-- **Хранилище** — SQLite (файл `data/remember.db`)
+- **Хранилище** — SQLite (файл `data/thefootnotes.db`)
 - **Дашборд** — FastAPI + одна HTML-страница
 - Бот и веб работают **в одном процессе** (бот в режиме polling запускается вместе с сервером)
 
@@ -23,7 +23,7 @@
 ## Локальный запуск
 
 ```bash
-cd remember_stuff
+cd thefootnotes
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 

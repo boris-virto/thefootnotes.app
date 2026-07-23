@@ -1,15 +1,15 @@
 [Unit]
-Description=remember_stuff — телеграм-бот и дашборд
+Description=thefootnotes — телеграм-бот и дашборд
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=remember
-Group=remember
-WorkingDirectory=/opt/remember_stuff
+User=thefootnotes
+Group=thefootnotes
+WorkingDirectory=/opt/thefootnotes
 # .env читается самим приложением (load_dotenv) из WorkingDirectory.
-ExecStart=/opt/remember_stuff/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/thefootnotes/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=3
 
@@ -19,7 +19,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # Единственное место, куда сервису можно писать — папка с базой и файлами.
-ReadWritePaths=/opt/remember_stuff/data
+ReadWritePaths=/opt/thefootnotes/data
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
