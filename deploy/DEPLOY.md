@@ -2,25 +2,28 @@
 
 Итог:
 - бот и дашборд — systemd-сервис под непривилегированным пользователем `remember` (с харденингом);
-- nginx отдаёт дашборд по HTTPS с паролем на `https://remember.amog.us.kg`;
+- nginx отдаёт дашборд по HTTPS с паролем на `https://thefootnotes.app`;
 - данные (SQLite + файлы) лежат на диске в `/opt/remember_stuff/data` и не теряются;
 - каждый `git push` в `main` автоматически выкатывается на сервер.
 
-Значения-примеры: поддомен `remember.amog.us.kg`, путь `/opt/remember_stuff`, пользователь `remember`,
+Значения-примеры: домен `thefootnotes.app`, путь `/opt/remember_stuff`, пользователь `remember`,
 репозиторий `github.com/USER/remember_stuff` (подставь свой).
 
 ---
 
 ## Шаг 0. DNS
 
-В панели, где управляешь доменом `amog.us.kg`, добавь запись:
+В DNS-настройках домена `thefootnotes.app` добавь запись на корень домена:
 
 ```
-Тип: A    Имя: remember    Значение: <публичный IP сервера>
+Тип: A    Имя: @    Значение: <публичный IP сервера>
 ```
 
 IP сервера можно узнать на самом сервере: `curl -4 ifconfig.me`. Проверить, что применилось:
-`ping remember.amog.us.kg` (должен резолвиться в IP сервера; может занять несколько минут).
+`ping thefootnotes.app` (должен резолвиться в IP сервера; может занять несколько минут).
+
+> `.app` — TLD из списка HSTS preload: браузеры работают с ним только по HTTPS. У нас HTTPS
+> настраивается через certbot (шаг 10), так что всё в порядке — просто plain-HTTP доступа не будет.
 
 ---
 
@@ -115,8 +118,8 @@ cp /opt/remember_stuff/deploy/nginx-remember.conf /etc/nginx/sites-available/rem
 ln -sf /etc/nginx/sites-available/remember /etc/nginx/sites-enabled/remember
 ```
 
-> Дефолтный сайт nginx (`/etc/nginx/sites-enabled/default`) НЕ удаляем — домен `amog.us.kg`
-> может использоваться под другое. Наш конфиг ловит только поддомен `remember.amog.us.kg`.
+> Дефолтный сайт nginx (`/etc/nginx/sites-enabled/default`) НЕ удаляем — если на сервере
+> есть другие домены, он их не сломает. Наш конфиг ловит только `thefootnotes.app`.
 
 ### 9. Пароль на дашборд
 
@@ -128,7 +131,7 @@ htpasswd -c /etc/nginx/.htpasswd-remember boris   # спросит и подтв
 
 ```bash
 nginx -t && systemctl reload nginx
-certbot --nginx -d remember.amog.us.kg    # спросит email и согласие; сам настроит 443 и редирект
+certbot --nginx -d thefootnotes.app    # спросит email и согласие; сам настроит 443 и редирект
 ```
 
 ### 11. Файрвол, если включён ufw
@@ -138,7 +141,7 @@ ufw status                       # если "inactive" — пропусти
 ufw allow 22 && ufw allow 80 && ufw allow 443
 ```
 
-Проверка: открой **https://remember.amog.us.kg** → логин/пароль из шага 9 → дашборд.
+Проверка: открой **https://thefootnotes.app** → логин/пароль из шага 9 → дашборд.
 
 ---
 
@@ -171,7 +174,7 @@ chown -R remember:remember /home/remember/.ssh
 
 | Имя | Значение |
 |-----|----------|
-| `SSH_HOST` | `remember.amog.us.kg` |
+| `SSH_HOST` | `thefootnotes.app` |
 | `SSH_USER` | `remember` |
 | `SSH_KEY`  | содержимое **приватного** файла `~/.ssh/remember_deploy` (целиком) |
 

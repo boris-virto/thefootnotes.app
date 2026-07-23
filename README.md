@@ -40,7 +40,7 @@ uvicorn app.main:app --reload --port 8000
 Полный пошаговый runbook — в [`deploy/DEPLOY.md`](deploy/DEPLOY.md). Кратко:
 
 - бот и дашборд крутятся как systemd-сервис под непривилегированным пользователем;
-- nginx отдаёт дашборд по HTTPS с паролем на поддомене;
+- nginx отдаёт дашборд по HTTPS с паролем на домене `thefootnotes.app`;
 - данные (SQLite + файлы) лежат на реальном диске и не теряются;
 - каждый `git push` в `main` автоматически выкатывается на сервер (`.github/workflows/deploy.yml`);
 - адрес базы вынесен в `DATABASE_URL` — переезд на PostgreSQL не требует правок кода.
