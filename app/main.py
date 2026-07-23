@@ -89,13 +89,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-# Сессия в подписанной куке (HttpOnly, Secure, SameSite=Lax).
+# Сессия в подписанной куке (HttpOnly, Secure).
+# SameSite=None обязателен: Telegram Login Widget возвращает пользователя на /auth/telegram
+# редиректом из своего домена (oauth.telegram.org) — при Lax браузер не отдаёт куку на
+# этом cross-site переходе, и вход не «прилипает». None требует Secure (у нас включён).
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
     session_cookie="tf_session",
     https_only=True,
-    same_site="lax",
+    same_site="none",
     max_age=30 * 24 * 60 * 60,  # держим вход месяц
 )
 
