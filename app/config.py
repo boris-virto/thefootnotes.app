@@ -1,4 +1,5 @@
 """Конфигурация: читаем настройки из окружения (.env локально, переменные среды в облаке)."""
+import hashlib
 import os
 from pathlib import Path
 
@@ -25,6 +26,13 @@ DIGEST_TIME = os.getenv("DIGEST_TIME", "09:00")
 # В личном чате Telegram chat_id совпадает с твоим user id.
 _digest_chat = os.getenv("DIGEST_CHAT_ID", "").strip()
 DIGEST_CHAT_ID = int(_digest_chat) if _digest_chat else None
+
+# Секрет для подписи сессионной куки веб-дашборда. Если не задан — выводим из токена
+# бота, чтобы всё работало без лишней настройки (сессии переживают рестарт, пока токен
+# тот же). Хочешь независимый секрет — задай SESSION_SECRET в окружении.
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip() or hashlib.sha256(
+    f"session:{TELEGRAM_BOT_TOKEN}".encode()
+).hexdigest()
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 FILES_DIR = DATA_DIR / "files"

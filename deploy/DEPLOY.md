@@ -127,11 +127,20 @@ ln -sf /etc/nginx/sites-available/thefootnotes /etc/nginx/sites-enabled/thefootn
 > Дефолтный сайт nginx (`/etc/nginx/sites-enabled/default`) НЕ удаляем — если на сервере
 > есть другие домены, он их не сломает. Наш конфиг ловит только `thefootnotes.app`.
 
-### 9. Пароль на дашборд
+### 9. Доступ к дашборду — вход по Telegram
 
-```bash
-htpasswd -c /etc/nginx/.htpasswd-thefootnotes boris   # спросит и подтвердит пароль
-```
+Пароль в nginx (basic-auth) больше **не нужен** — авторизацию делает само приложение
+через Telegram Login Widget, сверяя твой user id с `ALLOWED_USER_IDS`. Конфиги nginx
+(`nginx-thefootnotes*.conf`) уже без `auth_basic`.
+
+Единственное, что нужно сделать один раз — **привязать домен к боту**, иначе кнопка входа
+не появится:
+
+1. Напиши [@BotFather](https://t.me/BotFather) → `/setdomain`.
+2. Выбери своего бота.
+3. Отправь домен: `thefootnotes.app`.
+
+> Если раньше создавал файл `/etc/nginx/.htpasswd-thefootnotes` — его можно удалить.
 
 ### 10. HTTPS-сертификат
 

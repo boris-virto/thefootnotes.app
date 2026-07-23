@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход · Мои напоминания</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #f4f1ea; color: #1c1c1c; padding: 24px;
+    }
+    @media (prefers-color-scheme: dark) { body { background: #1a1a1a; color: #eee; } .box { background: #262626 !important; } }
+    .box {
+      background: #fff; border-radius: 16px; padding: 32px 28px; text-align: center;
+      box-shadow: 0 2px 12px rgba(0,0,0,.1); max-width: 360px; width: 100%;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 8px; }
+    p { color: #888; font-size: 0.9rem; margin: 0 0 24px; }
+    .widget { display: flex; justify-content: center; min-height: 46px; }
+    .note { color: #999; font-size: 0.8rem; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>📌 Мои напоминания</h1>
+    <p>Войди через Telegram, чтобы открыть дашборд.</p>
+
+    <div class="widget">
+      {% if bot_username %}
+      <script async src="https://telegram.org/js/telegram-widget.js?22"
+        data-telegram-login="{{ bot_username }}"
+        data-size="large"
+        data-radius="10"
+        data-auth-url="/auth/telegram"
+        data-userpic="true"></script>
+      {% else %}
+      <p style="color:#c0392b">Бот не запущен — вход недоступен. Проверь TELEGRAM_BOT_TOKEN.</p>
+      {% endif %}
+    </div>
+
+    <div class="note">Доступ открыт только разрешённым аккаунтам.</div>
+  </div>
+</body>
+</html>
