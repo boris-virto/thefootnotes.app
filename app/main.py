@@ -36,6 +36,10 @@ from .config import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# httpx на уровне INFO пишет полный URL запроса, включая токен бота
+# (https://api.telegram.org/bot<TOKEN>/...), что утекает в journalctl. Глушим до WARNING.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
