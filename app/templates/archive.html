@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Архив</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f4f1ea; --fg:#1c1c1c; --card:#fff; --muted:#999; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#1a1a1a; --fg:#eee; --card:#262626; --muted:#888; }
+    }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 20px; background: var(--bg); color: var(--fg); }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.9rem; }
+    .sub a { color: inherit; }
+    .grid { display: grid; gap: 10px; max-width: 720px; }
+    .card { background: var(--card); border-radius: 12px; padding: 12px 14px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.10); display: flex; gap: 10px; align-items: flex-start; }
+    .emoji { font-size: 1.2rem; }
+    .title { font-weight: 600; }
+    .meta { color: var(--muted); font-size: 0.82rem; margin-top: 4px; }
+    .restore { margin-left: auto; border: none; background: transparent; color: var(--muted);
+      cursor: pointer; font-size: 0.85rem; }
+    .restore:hover { color: var(--fg); }
+    .empty { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <h1>Архив</h1>
+  <p class="sub"><a href="/">← к доске</a>{% if user_name %} · <a href="/logout">выйти</a>{% endif %}</p>
+
+  {% if not reminders %}<p class="empty">В архиве пусто.</p>{% endif %}
+
+  <div class="grid">
+    {% for r in reminders %}
+    <div class="card">
+      <span class="emoji">{{ emoji.get(r.category, "📝") }}</span>
+      <div>
+        <div class="title">{{ r.title }}</div>
+        <div class="meta">
+          {% if r.event_date %}🗓 {{ r.event_date.strftime("%d.%m.%Y") }} · {% endif %}{{ r.category }}
+        </div>
+      </div>
+      <button class="restore" data-id="{{ r.id }}" title="Вернуть в TODO">↩︎ вернуть</button>
+    </div>
+    {% endfor %}
+  </div>
+
+  <script>
+    document.querySelectorAll(".restore").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const res = await fetch(`/status/${btn.dataset.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "todo" }),
+        });
+        if (res.ok) location.reload(); else alert("Не удалось вернуть");
+      });
+    });
+  </script>
+</body>
+</html>

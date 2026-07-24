@@ -160,20 +160,78 @@ async def logout(request: Request):
 # --- Дашборд (требует входа) -------------------------------------------------
 
 
+COLUMNS = [
+    ("todo", "TODO"),
+    ("doing", "В процессе"),
+    ("done", "Сделано"),
+]
+IMPORTANCE_EMOJI = {3: "🔴", 2: "🟡", 1: "🟢"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if redirect := _require_login(request):
         return redirect
-    reminders = db.list_reminders()
+    board = db.list_board()  # уже отсортировано: по сроку, затем по важности
+    columns = {key: [] for key, _ in COLUMNS}
+    for r in board:
+        columns.setdefault(r.status, []).append(r)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
-            "reminders": reminders,
+            "columns": columns,
+            "column_defs": COLUMNS,
             "emoji": CATEGORY_EMOJI,
+            "importance_emoji": IMPORTANCE_EMOJI,
             "user_name": request.session.get("name"),
         },
     )
+
+
+@app.get("/archive", response_class=HTMLResponse)
+async def archive(request: Request):
+    if redirect := _require_login(request):
+        return redirect
+    return templates.TemplateResponse(
+        request,
+        "archive.html",
+        {
+            "reminders": db.list_archived(),
+            "emoji": CATEGORY_EMOJI,
+            "importance_emoji": IMPORTANCE_EMOJI,
+            "user_name": request.session.get("name"),
+        },
+    )
+
+
+def _api_guard(request: Request) -> None:
+    """Для fetch-эндпоинтов: при отсутствии сессии отдаём 401, а не редирект на HTML."""
+    if not _logged_in(request):
+        raise HTTPException(status_code=401, detail="Требуется вход")
+
+
+@app.post("/status/{reminder_id}")
+async def set_status(request: Request, reminder_id: int):
+    _api_guard(request)
+    body = await request.json()
+    status = body.get("status")
+    if status not in db.VALID_STATUSES:
+        raise HTTPException(status_code=400, detail="Недопустимый статус")
+    db.set_status(reminder_id, status)
+    return {"ok": True, "status": status}
+
+
+@app.post("/importance/{reminder_id}")
+async def set_importance(request: Request, reminder_id: int):
+    _api_guard(request)
+    body = await request.json()
+    try:
+        level = int(body.get("importance"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректная важность")
+    db.set_importance(reminder_id, level)
+    return {"ok": True, "importance": max(1, min(3, level))}
 
 
 @app.post("/done/{reminder_id}")

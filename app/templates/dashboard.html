@@ -3,64 +3,138 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Мои напоминания</title>
+  <title>Мои задачи</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: light dark; --bg:#f4f1ea; --fg:#1c1c1c; --card:#fff; --muted:#999; --col:#ece8df; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#1a1a1a; --fg:#eee; --card:#262626; --muted:#888; --col:#202020; }
+    }
     * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      margin: 0; padding: 24px; background: #f4f1ea; color: #1c1c1c;
-    }
-    @media (prefers-color-scheme: dark) { body { background: #1a1a1a; color: #eee; } .card { background: #262626 !important; } }
-    h1 { font-size: 1.6rem; margin: 0 0 4px; }
-    .sub { color: #888; margin: 0 0 24px; font-size: 0.9rem; }
-    .grid { display: grid; gap: 12px; max-width: 720px; }
-    .card {
-      background: #fff; border-radius: 12px; padding: 14px 16px;
-      box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; gap: 12px; align-items: flex-start;
-    }
-    .emoji { font-size: 1.4rem; line-height: 1.4; }
-    .title { font-weight: 600; }
-    .meta { color: #999; font-size: 0.85rem; margin-top: 4px; }
-    .notes { font-size: 0.85rem; margin-top: 6px; }
-    .empty { color: #999; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 20px; background: var(--bg); color: var(--fg); }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.9rem; }
     .sub a { color: inherit; }
-    form.done { margin-left: auto; }
-    button {
-      border: none; background: transparent; cursor: pointer; font-size: 1.1rem;
-      opacity: .5; padding: 2px 6px;
-    }
-    button:hover { opacity: 1; }
+
+    .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
+    .col { flex: 1 1 0; min-width: 260px; background: var(--col); border-radius: 14px; padding: 10px; }
+    .col h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--muted); margin: 4px 6px 10px; display: flex; justify-content: space-between; }
+    .col-body { display: flex; flex-direction: column; gap: 10px; min-height: 60px; border-radius: 10px; }
+    .col-body.over { outline: 2px dashed var(--muted); outline-offset: 2px; }
+    .col-empty { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 16px 0; }
+
+    .card { background: var(--card); border-radius: 12px; padding: 12px 12px 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.10); cursor: grab; }
+    .card.dragging { opacity: .4; }
+    .card-top { display: flex; gap: 8px; align-items: flex-start; }
+    .imp { border: none; background: transparent; cursor: pointer; font-size: 1rem; padding: 0; line-height: 1.3; }
+    .emoji { font-size: 1.2rem; line-height: 1.3; }
+    .title { font-weight: 600; flex: 1; }
+    .meta { color: var(--muted); font-size: 0.82rem; margin-top: 6px; }
+    .notes { font-size: 0.82rem; margin-top: 6px; }
+    .notes a { color: inherit; }
+    .archive-btn { margin-top: 8px; border: none; background: transparent; color: var(--muted);
+      cursor: pointer; font-size: 0.8rem; padding: 2px 0; }
+    .archive-btn:hover { color: var(--fg); }
+    .hint { color: var(--muted); font-size: 0.8rem; margin-top: 16px; }
   </style>
 </head>
 <body>
-  <h1>Мои напоминания</h1>
-  <p class="sub">{{ reminders|length }} активных · обновляется при перезагрузке
-    {% if user_name %} · {{ user_name }} · <a href="/logout">выйти</a>{% endif %}</p>
+  <h1>Мои задачи</h1>
+  <p class="sub">перетаскивай карточки между колонками · клик по кружку — важность
+    {% if user_name %} · {{ user_name }}{% endif %}
+    · <a href="/archive">архив</a>
+    {% if user_name %} · <a href="/logout">выйти</a>{% endif %}</p>
 
-  {% if not reminders %}
-    <p class="empty">Пока пусто. Напиши что-нибудь боту в Telegram.</p>
-  {% endif %}
-
-  <div class="grid">
-    {% for r in reminders %}
-    <div class="card">
-      <div class="emoji">{{ emoji.get(r.category, "📝") }}</div>
-      <div>
-        <div class="title">{{ r.title }}</div>
-        <div class="meta">
-          {% if r.event_date %}🗓 {{ r.event_date.strftime("%d.%m.%Y") }}{% if r.event_time %} в {{ r.event_time }}{% endif %} · {% endif %}
-          {% if r.location %}📍 {{ r.location }} · {% endif %}
-          {{ r.category }}
-        </div>
-        {% if r.notes %}<div class="notes">{{ r.notes }}</div>{% endif %}
-        {% if r.file_path %}<div class="notes"><a href="/file/{{ r.id }}">📎 Скачать файл</a></div>{% endif %}
+  <div class="board">
+    {% for key, label in column_defs %}
+    <section class="col">
+      <h2><span>{{ label }}</span><span>{{ columns[key]|length }}</span></h2>
+      <div class="col-body" data-status="{{ key }}">
+        {% for r in columns[key] %}
+        <article class="card" draggable="true" data-id="{{ r.id }}">
+          <div class="card-top">
+            <button class="imp" draggable="false" data-id="{{ r.id }}" data-level="{{ r.importance }}"
+              title="Важность — клик, чтобы изменить">{{ importance_emoji.get(r.importance, "🟡") }}</button>
+            <span class="emoji">{{ emoji.get(r.category, "📝") }}</span>
+            <span class="title">{{ r.title }}</span>
+          </div>
+          {% if r.event_date or r.location %}
+          <div class="meta">
+            {% if r.event_date %}🗓 {{ r.event_date.strftime("%d.%m.%Y") }}{% if r.event_time %} в {{ r.event_time }}{% endif %}{% endif %}
+            {% if r.event_date and r.location %} · {% endif %}
+            {% if r.location %}📍 {{ r.location }}{% endif %}
+          </div>
+          {% endif %}
+          {% if r.notes %}<div class="notes">{{ r.notes }}</div>{% endif %}
+          {% if r.file_path %}<div class="notes"><a href="/file/{{ r.id }}">📎 Скачать файл</a></div>{% endif %}
+          {% if key == "done" %}
+          <button class="archive-btn" data-id="{{ r.id }}">🗄 В архив</button>
+          {% endif %}
+        </article>
+        {% endfor %}
+        {% if not columns[key] %}<div class="col-empty">пусто</div>{% endif %}
       </div>
-      <form class="done" method="post" action="/done/{{ r.id }}">
-        <button type="submit" title="Отметить выполненным">✔</button>
-      </form>
-    </div>
+    </section>
     {% endfor %}
   </div>
+
+  <p class="hint">Карточки создаются из сообщений боту в Telegram.</p>
+
+  <script>
+    async function patch(url, payload) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) { alert("Не удалось сохранить изменение"); }
+      return res.ok;
+    }
+
+    // --- Drag & drop между колонками ---
+    document.querySelectorAll(".card").forEach((card) => {
+      card.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", card.dataset.id);
+        e.dataTransfer.effectAllowed = "move";
+        card.classList.add("dragging");
+      });
+      card.addEventListener("dragend", () => card.classList.remove("dragging"));
+    });
+
+    document.querySelectorAll(".col-body").forEach((col) => {
+      col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("over"); });
+      col.addEventListener("dragleave", () => col.classList.remove("over"));
+      col.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        col.classList.remove("over");
+        const id = e.dataTransfer.getData("text/plain");
+        const card = document.querySelector(`.card[data-id="${id}"]`);
+        if (!card) return;
+        const status = col.dataset.status;
+        if (card.parentElement === col) return; // тот же столбец — ничего не делаем
+        col.appendChild(card); // оптимистично двигаем, затем сохраняем и перерисовываем
+        if (await patch(`/status/${id}`, { status })) location.reload();
+        else location.reload();
+      });
+    });
+
+    // --- Важность: клик циклирует 1 -> 2 -> 3 -> 1 ---
+    document.querySelectorAll(".imp").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const next = (parseInt(btn.dataset.level, 10) % 3) + 1;
+        if (await patch(`/importance/${btn.dataset.id}`, { importance: next })) location.reload();
+      });
+    });
+
+    // --- Архивирование из колонки «Сделано» ---
+    document.querySelectorAll(".archive-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (await patch(`/status/${btn.dataset.id}`, { status: "archived" })) location.reload();
+      });
+    });
+  </script>
 </body>
 </html>

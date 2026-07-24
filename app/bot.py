@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -34,6 +35,18 @@ from .llm import ExtractedReminder
 logger = logging.getLogger(__name__)
 
 CATEGORY_EMOJI = {"task": "✅", "event": "📅", "ticket": "🎫", "note": "📝"}
+
+# Важность: строка от LLM -> число в БД, и отображение.
+IMPORTANCE_FROM_LLM = {"high": 3, "normal": 2, "low": 1}
+IMPORTANCE_EMOJI = {3: "🔴", 2: "🟡", 1: "🟢"}
+STATUS_NAME = {"todo": "TODO", "doing": "В процессе", "done": "Сделано", "archived": "Архив"}
+
+# Куда можно перевести карточку из текущего статуса (подпись, новый статус).
+STATUS_TRANSITIONS = {
+    "todo": [("▶️ В работу", "doing"), ("✅ Готово", "done")],
+    "doing": [("✅ Готово", "done"), ("↩️ В TODO", "todo")],
+    "done": [("🗄 В архив", "archived"), ("↩️ Вернуть", "doing")],
+}
 
 _URL_RE = re.compile(r"https?://\S+")
 
@@ -169,7 +182,8 @@ def schedule_event_reminder(job_queue: JobQueue, reminder: db.Reminder) -> bool:
 
 def _digest_line(reminder: db.Reminder, *, with_date: bool = True) -> str:
     emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
-    line = f"{emoji} <b>{reminder.title}</b>"
+    imp = IMPORTANCE_EMOJI.get(reminder.importance, "") if reminder.importance == 3 else ""
+    line = f"{imp}{' ' if imp else ''}{emoji} <b>{reminder.title}</b>"
     if with_date and reminder.event_date:
         line += f" — {reminder.event_date.strftime('%d.%m')}"
     if reminder.event_time:
@@ -252,7 +266,7 @@ def _format_digest(reminders: list[db.Reminder], today) -> str | None:
 
 async def _send_morning_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Callback ежедневной задачи: рассылает список актуальных напоминаний."""
-    reminders = await asyncio.to_thread(db.list_reminders)  # только невыполненные
+    reminders = await asyncio.to_thread(db.list_active)  # todo + в процессе
     if not reminders:
         return
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
@@ -320,6 +334,7 @@ def _save(
 ):
     recurrence = extracted.recurrence
     remind_time = extracted.remind_time or (DEFAULT_REMIND_TIME if recurrence else None)
+    importance = IMPORTANCE_FROM_LLM.get((extracted.importance or "normal").lower(), 2)
     return db.add_reminder(
         title=extracted.title,
         category=extracted.category or "note",
@@ -333,6 +348,7 @@ def _save(
         chat_id=chat_id,
         recurrence=recurrence,
         remind_time=remind_time,
+        importance=importance,
     )
 
 
@@ -363,7 +379,9 @@ async def _save_and_schedule(
 
 def _confirmation(reminder: db.Reminder) -> str:
     emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
-    lines = [f"{emoji} <b>{reminder.title}</b>"]
+    imp = IMPORTANCE_EMOJI.get(reminder.importance, "")
+    prefix = f"{imp} " if imp else ""
+    lines = [f"{prefix}{emoji} <b>{reminder.title}</b>"]
     if reminder.event_date:
         when = reminder.event_date.strftime("%d.%m.%Y")
         if reminder.event_time:
@@ -403,37 +421,86 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет! Кидай сюда что нужно не забыть — текстом, голосом, "
         "скриншотом билета или PDF. Я разберу и сохраню.\n\n"
         "Могу напоминать регулярно — просто напиши «напоминать каждый понедельник в 9:00».\n\n"
-        "Команды:\n/list — показать напоминания\n"
+        "Команды:\n/list — доска задач с кнопками статуса\n"
         "/digest — утренний дайджест прямо сейчас\n"
         "/reminders — регулярные напоминания и выключатель\n"
         "/files — скачать сохранённые билеты и файлы"
     )
 
 
+def _list_line(reminder: db.Reminder) -> str:
+    """Одна карточка для /list: важность, категория, название, дата и статус."""
+    emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
+    imp = IMPORTANCE_EMOJI.get(reminder.importance, "🟡")
+    line = f"{imp} {emoji} <b>{reminder.title}</b>"
+    if reminder.event_date:
+        line += f" — {reminder.event_date.strftime('%d.%m')}"
+        if reminder.event_time:
+            line += f" {reminder.event_time}"
+    line += f"\n<i>{STATUS_NAME.get(reminder.status, reminder.status)}</i>"
+    return line
+
+
+def _status_keyboard(reminder: db.Reminder) -> InlineKeyboardMarkup:
+    """Кнопки перехода статуса, зависят от текущего статуса карточки."""
+    row = [
+        InlineKeyboardButton(text, callback_data=f"st:{reminder.id}:{status}")
+        for text, status in STATUS_TRANSITIONS.get(reminder.status, [])
+    ]
+    return InlineKeyboardMarkup([row]) if row else InlineKeyboardMarkup([])
+
+
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
-    reminders = await asyncio.to_thread(db.list_reminders)
+    reminders = await asyncio.to_thread(db.list_board)  # todo + в процессе + сделано
     if not reminders:
         await update.message.reply_text("Пока пусто. Кинь мне первое напоминание 🙂")
         return
-    blocks = []
     for r in reminders:
-        emoji = CATEGORY_EMOJI.get(r.category, "📝")
-        line = f"{emoji} <b>{r.title}</b>"
-        if r.event_date:
-            line += f" — {r.event_date.strftime('%d.%m')}"
-            if r.event_time:
-                line += f" {r.event_time}"
-        blocks.append(line)
-    await update.message.reply_text("\n".join(blocks), parse_mode="HTML")
+        await update.message.reply_text(
+            _list_line(r), parse_mode="HTML", reply_markup=_status_keyboard(r)
+        )
+
+
+async def on_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not (query.from_user and user_allowed(query.from_user.id)):
+        await query.answer("Доступ закрыт")
+        return
+    _, sid, status = query.data.split(":")
+    reminder_id = int(sid)
+    await asyncio.to_thread(db.set_status, reminder_id, status)
+    reminder = await asyncio.to_thread(db.get_reminder, reminder_id)
+    await query.answer(f"Статус: {STATUS_NAME.get(status, status)}")
+
+    # Пинг «за день до» нужен только активным задачам с будущей датой.
+    jq = context.application.job_queue
+    if status in ("done", "archived"):
+        for job in jq.get_jobs_by_name(f"event:{reminder_id}"):
+            job.schedule_removal()
+    elif reminder:
+        schedule_event_reminder(jq, reminder)
+
+    try:
+        if not reminder or status == "archived":
+            title = reminder.title if reminder else ""
+            await query.edit_message_text(f"🗄 В архив: {title}")
+        else:
+            await query.edit_message_text(
+                _list_line(reminder), parse_mode="HTML", reply_markup=_status_keyboard(reminder)
+            )
+    except BadRequest as e:
+        # Двойной тап на ту же кнопку -> «message is not modified». Это не ошибка.
+        if "not modified" not in str(e).lower():
+            raise
 
 
 async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать дайджест прямо сейчас (тот же, что уходит утром)."""
     if not await _guard(update):
         return
-    reminders = await asyncio.to_thread(db.list_reminders)
+    reminders = await asyncio.to_thread(db.list_active)
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
     # Ручной вызов — показываем всё будущее целиком, без «раз в месяц».
     text = _format_digest(reminders, today) or "Пока нечего показать — список пуст 🙂"
@@ -614,6 +681,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("files", files_cmd))
     app.add_handler(CallbackQueryHandler(on_stop_reminder, pattern=r"^stop:"))
     app.add_handler(CallbackQueryHandler(on_send_file, pattern=r"^file:"))
+    app.add_handler(CallbackQueryHandler(on_set_status, pattern=r"^st:"))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
