@@ -179,9 +179,48 @@ def _digest_line(reminder: db.Reminder, *, with_date: bool = True) -> str:
     return line
 
 
+# Ритм напоминаний о будущих событиях в автодайджесте. «Корзины» по числу дней до
+# события (по возрастанию): в пределах месяца (≤30) напоминаем каждый день, а рубежи
+# 60 и 90 дней — по одному разу. Точную дату рубежа не ловим: как только событие
+# впервые попадает в корзину, шлём напоминание и запоминаем рубеж (digest_milestone),
+# поэтому пропущенная утром рассылка не теряет «разовое» напоминание.
+DIGEST_DAILY_DAYS = 30
+_DIGEST_BUCKETS = (30, 60, 90)  # по возрастанию; 30 = ежедневная зона
+
+
+def _digest_bucket(days: int) -> int | None:
+    """Наименьший рубеж, в который укладывается число дней до события.
+    None — событие ещё слишком далеко (дальше самого дальнего рубежа)."""
+    for bucket in _DIGEST_BUCKETS:
+        if days <= bucket:
+            return bucket
+    return None
+
+
+def _auto_digest_decision(reminder: db.Reminder, today) -> tuple[bool, int | None]:
+    """Для автодайджеста: (показывать ли, каким должен стать digest_milestone).
+    События без даты / просроченные / сегодняшние показываем всегда и рубеж не трогаем.
+    Будущие — по корзинам: ежедневная зона показывается каждый день, рубежи 60/90 —
+    только если ещё не отправляли этот (или более близкий) рубеж."""
+    d = reminder.event_date
+    if d is None or d <= today:
+        return True, reminder.digest_milestone
+    bucket = _digest_bucket((d - today).days)
+    if bucket is None:
+        # Слишком далеко (или событие перенесли дальше 3 месяцев) — сбрасываем рубеж,
+        # чтобы при возвращении в окно напоминания сработали заново.
+        return False, None
+    if bucket == DIGEST_DAILY_DAYS:
+        return True, DIGEST_DAILY_DAYS
+    stored = reminder.digest_milestone
+    if stored is None or stored > bucket:
+        return True, bucket  # этот рубеж ещё не отправляли
+    return False, stored
+
+
 def _format_digest(reminders: list[db.Reminder], today) -> str | None:
     """Собирает текст дайджеста, разбивая напоминания на секции по дате.
-    Возвращает None, если показывать нечего."""
+    Список уже должен быть отфильтрован вызывающим. Возвращает None, если пусто."""
     overdue, todays, upcoming, undated = [], [], [], []
     for r in reminders:
         if r.event_date is None:
@@ -217,6 +256,18 @@ async def _send_morning_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not reminders:
         return
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
+
+    # Решаем, что показать сегодня, и запоминаем отправленные рубежи.
+    visible = []
+    for r in reminders:
+        show, milestone = _auto_digest_decision(r, today)
+        if milestone != r.digest_milestone:
+            await asyncio.to_thread(db.set_digest_milestone, r.id, milestone)
+        if show:
+            visible.append(r)
+    if not visible:
+        return
+    reminders = visible
 
     # Кому и что слать.
     if DIGEST_CHAT_ID is not None:
@@ -384,6 +435,7 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     reminders = await asyncio.to_thread(db.list_reminders)
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
+    # Ручной вызов — показываем всё будущее целиком, без «раз в месяц».
     text = _format_digest(reminders, today) or "Пока нечего показать — список пуст 🙂"
     await update.message.reply_text(text, parse_mode="HTML")
 

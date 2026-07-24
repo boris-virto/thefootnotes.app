@@ -40,6 +40,11 @@ class Reminder(Base):
     remind_time: Mapped[str | None] = mapped_column(String(20), nullable=True)  # HH:MM
     remind_active: Mapped[bool] = mapped_column(Boolean, default=True)  # пинги включены?
 
+    # Последний отправленный рубеж дайджеста для будущего события: 90/60/30 дней
+    # (None — ещё ни одного). Нужно, чтобы «разовые» напоминания за 3 и 2 месяца
+    # не терялись при пропущенной рассылке и не повторялись каждый день.
+    digest_milestone: Mapped[int | None] = mapped_column(nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -61,6 +66,7 @@ def _migrate() -> None:
         "recurrence": "VARCHAR(50)",
         "remind_time": "VARCHAR(20)",
         "remind_active": "BOOLEAN DEFAULT 1",
+        "digest_milestone": "INTEGER",
     }
     with engine.begin() as conn:
         existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(reminders)")}
@@ -141,4 +147,13 @@ def set_remind_active(reminder_id: int, active: bool) -> None:
         reminder = session.get(Reminder, reminder_id)
         if reminder:
             reminder.remind_active = active
+            session.commit()
+
+
+def set_digest_milestone(reminder_id: int, milestone: int | None) -> None:
+    """Запоминает последний отправленный рубеж дайджеста для события."""
+    with Session(engine) as session:
+        reminder = session.get(Reminder, reminder_id)
+        if reminder:
+            reminder.digest_milestone = milestone
             session.commit()
