@@ -502,8 +502,10 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     reminders = await asyncio.to_thread(db.list_active)
     today = datetime.now(ZoneInfo(TIMEZONE)).date()
-    # Ручной вызов — показываем всё будущее целиком, без «раз в месяц».
-    text = _format_digest(reminders, today) or "Пока нечего показать — список пуст 🙂"
+    # Тот же отбор, что у утренней рассылки (далёкие билеты не показываем),
+    # но без записи рубежей — ручной вызов ничего не «расходует».
+    visible = [r for r in reminders if _auto_digest_decision(r, today)[0]]
+    text = _format_digest(visible, today) or "Пока нечего показать — список пуст 🙂"
     await update.message.reply_text(text, parse_mode="HTML")
 
 
