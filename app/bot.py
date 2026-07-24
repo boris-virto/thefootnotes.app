@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
@@ -672,6 +672,21 @@ async def on_send_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = await asyncio.to_thread(path.read_bytes)
     filename = f"{reminder.title}{path.suffix}"
     await context.bot.send_document(query.message.chat_id, document=data, filename=filename)
+
+
+# Список команд для автодополнения по «/» и кнопки «Меню» в клиенте Telegram.
+BOT_COMMANDS = [
+    BotCommand("list", "📋 Доска задач"),
+    BotCommand("digest", "☀️ Дайджест сейчас"),
+    BotCommand("reminders", "🔔 Регулярные напоминания"),
+    BotCommand("files", "📎 Сохранённые файлы"),
+    BotCommand("start", "ℹ️ Помощь"),
+]
+
+
+async def setup_commands(app: Application) -> None:
+    """Регистрирует список команд — включает подсказки по «/» и кнопку «Меню»."""
+    await app.bot.set_my_commands(BOT_COMMANDS)
 
 
 def build_application() -> Application:

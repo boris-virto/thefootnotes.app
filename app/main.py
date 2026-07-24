@@ -25,6 +25,7 @@ from .bot import (
     schedule_digest,
     schedule_event_reminder,
     schedule_reminder,
+    setup_commands,
 )
 from .config import (
     DIGEST_TIME,
@@ -58,6 +59,9 @@ async def lifespan(app: FastAPI):
         # Имя бота нужно для кнопки входа Telegram Login Widget.
         me = await tg_app.bot.get_me()
         app.state.bot_username = me.username
+
+        # Регистрируем команды: подсказки по «/» и кнопка «Меню» в клиенте.
+        await setup_commands(tg_app)
 
         # Восстанавливаем задачи из базы после рестарта.
         recurring = 0
