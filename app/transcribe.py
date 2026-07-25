@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 
 from openai import OpenAI
 
-from .config import OPENAI_API_KEY, WHISPER_LOCAL_MODEL
+from .config import DATA_DIR, OPENAI_API_KEY, WHISPER_LOCAL_MODEL
 
 logger = logging.getLogger(__name__)
+
+# Модель локального Whisper кладём в DATA_DIR: под systemd (ProtectHome=true,
+# ProtectSystem=strict) единственная пишущая директория — /opt/thefootnotes/data,
+# а дефолтный кэш HuggingFace в ~/.cache недоступен.
+_MODELS_DIR = DATA_DIR / "whisper-models"
+os.environ.setdefault("HF_HOME", str(_MODELS_DIR / "hf"))
 
 # max_retries побольше дефолтных двух: Whisper иногда отдаёт транзиентный 500,
 # который проходит с повтора (SDK сам ждёт с экспоненциальной паузой).
@@ -40,8 +47,12 @@ def _get_local_model():
     if _local_model is None:
         from faster_whisper import WhisperModel  # тяжёлый импорт — только при надобности
 
+        _MODELS_DIR.mkdir(parents=True, exist_ok=True)
         logger.info("Загружаю локальную модель Whisper '%s' (CPU, int8)…", WHISPER_LOCAL_MODEL)
-        _local_model = WhisperModel(WHISPER_LOCAL_MODEL, device="cpu", compute_type="int8")
+        _local_model = WhisperModel(
+            WHISPER_LOCAL_MODEL, device="cpu", compute_type="int8",
+            download_root=str(_MODELS_DIR),
+        )
     return _local_model
 
 
