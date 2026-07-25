@@ -9,7 +9,9 @@ from openai import OpenAI
 
 from .config import OPENAI_API_KEY
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# max_retries побольше дефолтных двух: Whisper иногда отдаёт транзиентный 500,
+# который проходит с повтора (SDK сам ждёт с экспоненциальной паузой).
+client = OpenAI(api_key=OPENAI_API_KEY, max_retries=4)
 
 
 def transcribe(audio_bytes: bytes, filename: str = "voice.oga") -> str:

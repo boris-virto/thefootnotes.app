@@ -556,7 +556,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_file = await context.bot.get_file(voice.file_id)
     audio = bytes(await tg_file.download_as_bytearray())
 
-    text = await asyncio.to_thread(transcribe.transcribe, audio)
+    try:
+        text = await asyncio.to_thread(transcribe.transcribe, audio)
+    except Exception:
+        logger.exception("Не удалось расшифровать голосовое")
+        await update.message.reply_text(
+            "🎙 Не смог распознать голосовое — сервис распознавания сейчас недоступен. "
+            "Попробуй ещё раз через минуту или пришли текстом."
+        )
+        return
     extracted = await asyncio.to_thread(llm.structure_text, text)
     reminder = await _save_and_schedule(update, context, extracted, source="voice", raw_text=text)
     await update.message.reply_text(
@@ -689,8 +697,22 @@ async def setup_commands(app: Application) -> None:
     await app.bot.set_my_commands(BOT_COMMANDS)
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловим любую необработанную ошибку в хендлерах: логируем и, если можем,
+    отвечаем пользователю — чтобы запрос не «пропадал молча»."""
+    logger.exception("Необработанная ошибка при обработке апдейта", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Что-то пошло не так при обработке. Попробуй ещё раз чуть позже."
+            )
+        except Exception:
+            logger.exception("Не удалось отправить сообщение об ошибке пользователю")
+
+
 def build_application() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("digest", digest_cmd))
