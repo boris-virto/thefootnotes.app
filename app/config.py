@@ -16,6 +16,10 @@ ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-8")
 # Часовой пояс для времени напоминаний (IANA, напр. Europe/Belgrade, Europe/Moscow).
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Belgrade")
 
+# Размер локальной модели Whisper для фолбэка, когда OpenAI недоступен.
+# tiny/base — быстрее и легче по памяти, small/medium — точнее, но тяжелее для VPS.
+WHISPER_LOCAL_MODEL = os.getenv("WHISPER_LOCAL_MODEL", "base")
+
 # Список разрешённых telegram user id. Пусто -> доступ всем.
 _allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
 ALLOWED_USER_IDS = {int(x) for x in _allowed.split(",") if x.strip()} if _allowed else set()
@@ -26,6 +30,11 @@ DIGEST_TIME = os.getenv("DIGEST_TIME", "09:00")
 # В личном чате Telegram chat_id совпадает с твоим user id.
 _digest_chat = os.getenv("DIGEST_CHAT_ID", "").strip()
 DIGEST_CHAT_ID = int(_digest_chat) if _digest_chat else None
+
+# Кому слать уведомления об ошибках сервиса и кому показывать трейсбеки прямо в чате.
+# Обычно это владелец бота. Пусто -> уведомления об ошибках не шлём.
+_admin = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
+ADMIN_TELEGRAM_ID = int(_admin) if _admin else None
 
 # Секрет для подписи сессионной куки веб-дашборда. Если не задан — выводим из токена
 # бота, чтобы всё работало без лишней настройки (сессии переживают рестарт, пока токен

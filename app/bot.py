@@ -22,6 +22,7 @@ from telegram.ext import (
 )
 
 from . import db, llm, transcribe
+from .errors import report_error
 from .config import (
     DIGEST_CHAT_ID,
     DIGEST_TIME,
@@ -523,14 +524,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = pdf_urls[0]
         try:
             extracted = await asyncio.to_thread(llm.structure_pdf_url, url)
-        except Exception:
-            logger.exception("Не удалось прочитать PDF по ссылке")
-            await update.message.reply_text(
-                "Не смог открыть PDF по ссылке — возможно, он за логином или недоступен. "
-                "Попробуй прикрепить файл через 📎."
+            reminder = await _save_and_schedule(update, context, extracted, source="pdf", raw_text=url)
+        except Exception as e:
+            await report_error(
+                update, context, e, where="pdf-url",
+                user_message="Не смог открыть PDF по ссылке — возможно, он за логином или "
+                "недоступен. Попробуй прикрепить файл через 📎.",
             )
             return
-        reminder = await _save_and_schedule(update, context, extracted, source="pdf", raw_text=url)
         await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
         return
 
@@ -543,8 +544,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Обычный текст (в т.ч. заметка со ссылкой внутри).
-    extracted = await asyncio.to_thread(llm.structure_text, text)
-    reminder = await _save_and_schedule(update, context, extracted, source="text", raw_text=text)
+    try:
+        extracted = await asyncio.to_thread(llm.structure_text, text)
+        reminder = await _save_and_schedule(update, context, extracted, source="text", raw_text=text)
+    except Exception as e:
+        await report_error(
+            update, context, e, where="text",
+            user_message="Не смог разобрать сообщение в напоминание. Попробуй ещё раз.",
+        )
+        return
     await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
 
 
@@ -553,20 +561,47 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.chat.send_action("typing")
     voice = update.message.voice
-    tg_file = await context.bot.get_file(voice.file_id)
-    audio = bytes(await tg_file.download_as_bytearray())
 
     try:
-        text = await asyncio.to_thread(transcribe.transcribe, audio)
-    except Exception:
-        logger.exception("Не удалось расшифровать голосовое")
-        await update.message.reply_text(
-            "🎙 Не смог распознать голосовое — сервис распознавания сейчас недоступен. "
-            "Попробуй ещё раз через минуту или пришли текстом."
+        tg_file = await context.bot.get_file(voice.file_id)
+        audio = bytes(await tg_file.download_as_bytearray())
+    except Exception as e:
+        await report_error(
+            update, context, e, where="voice-download",
+            user_message="🎙 Не смог скачать голосовое. Попробуй ещё раз.",
         )
         return
-    extracted = await asyncio.to_thread(llm.structure_text, text)
-    reminder = await _save_and_schedule(update, context, extracted, source="voice", raw_text=text)
+
+    # Сначала облачный Whisper; если он сбоит — переходим на локальную модель
+    # (медленнее), обязательно предупредив пользователя о задержке.
+    try:
+        text = await asyncio.to_thread(transcribe.transcribe_remote, audio)
+    except Exception as e:
+        logger.warning("OpenAI Whisper недоступен, фолбэк на локальную модель: %s", e)
+        await update.message.reply_text(
+            "⏳ Облачное распознавание сейчас недоступно — распознаю локально. "
+            "Это займёт немного дольше, подожди…"
+        )
+        await update.message.chat.send_action("typing")
+        try:
+            text = await asyncio.to_thread(transcribe.transcribe_local, audio)
+        except Exception as e2:
+            await report_error(
+                update, context, e2, where="voice-transcribe-local",
+                user_message="🎙 Не смог распознать голосовое ни в облаке, ни локально. "
+                "Попробуй ещё раз или пришли текстом.",
+            )
+            return
+    try:
+        extracted = await asyncio.to_thread(llm.structure_text, text)
+        reminder = await _save_and_schedule(update, context, extracted, source="voice", raw_text=text)
+    except Exception as e:
+        await report_error(
+            update, context, e, where="voice-structure",
+            user_message=f"🎙 Расшифровал: «{text}»\n\n"
+            "…но не смог разобрать в напоминание. Попробуй ещё раз.",
+        )
+        return
     await update.message.reply_text(
         f"🎙 Расшифровал: <i>{text}</i>\n\n{_confirmation(reminder)}", parse_mode="HTML"
     )
@@ -577,14 +612,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.chat.send_action("typing")
     photo = update.message.photo[-1]  # самое большое разрешение
-    tg_file = await context.bot.get_file(photo.file_id)
-    image = bytes(await tg_file.download_as_bytearray())
-
-    path = FILES_DIR / f"{photo.file_unique_id}.jpg"
-    path.write_bytes(image)
-
-    extracted = await asyncio.to_thread(llm.structure_image, image, "image/jpeg")
-    reminder = await _save_and_schedule(update, context, extracted, source="photo", file_path=str(path))
+    try:
+        tg_file = await context.bot.get_file(photo.file_id)
+        image = bytes(await tg_file.download_as_bytearray())
+        path = FILES_DIR / f"{photo.file_unique_id}.jpg"
+        path.write_bytes(image)
+        extracted = await asyncio.to_thread(llm.structure_image, image, "image/jpeg")
+        reminder = await _save_and_schedule(update, context, extracted, source="photo", file_path=str(path))
+    except Exception as e:
+        await report_error(
+            update, context, e, where="photo",
+            user_message="🖼 Не смог разобрать фото. Попробуй ещё раз или пришли текстом.",
+        )
+        return
     await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
 
 
@@ -596,14 +636,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока умею читать только PDF из документов.")
         return
     await update.message.chat.send_action("typing")
-    tg_file = await context.bot.get_file(doc.file_id)
-    pdf = bytes(await tg_file.download_as_bytearray())
-
-    path = FILES_DIR / f"{doc.file_unique_id}.pdf"
-    path.write_bytes(pdf)
-
-    extracted = await asyncio.to_thread(llm.structure_pdf, pdf)
-    reminder = await _save_and_schedule(update, context, extracted, source="pdf", file_path=str(path))
+    try:
+        tg_file = await context.bot.get_file(doc.file_id)
+        pdf = bytes(await tg_file.download_as_bytearray())
+        path = FILES_DIR / f"{doc.file_unique_id}.pdf"
+        path.write_bytes(pdf)
+        extracted = await asyncio.to_thread(llm.structure_pdf, pdf)
+        reminder = await _save_and_schedule(update, context, extracted, source="pdf", file_path=str(path))
+    except Exception as e:
+        await report_error(
+            update, context, e, where="pdf-document",
+            user_message="📄 Не смог прочитать PDF. Попробуй ещё раз или пришли другой файл.",
+        )
+        return
     await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
 
 
@@ -698,16 +743,8 @@ async def setup_commands(app: Application) -> None:
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ловим любую необработанную ошибку в хендлерах: логируем и, если можем,
-    отвечаем пользователю — чтобы запрос не «пропадал молча»."""
-    logger.exception("Необработанная ошибка при обработке апдейта", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "⚠️ Что-то пошло не так при обработке. Попробуй ещё раз чуть позже."
-            )
-        except Exception:
-            logger.exception("Не удалось отправить сообщение об ошибке пользователю")
+    """Сеть безопасности: любая не пойманная в обработчике ошибка не пропадает молча."""
+    await report_error(update, context, context.error, where="telegram-update")
 
 
 def build_application() -> Application:
