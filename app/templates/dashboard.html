@@ -16,13 +16,16 @@
     .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.9rem; }
     .sub a { color: inherit; }
 
-    .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 8px; }
-    .col { flex: 1 1 0; min-width: 260px; background: var(--col); border-radius: 14px; padding: 10px; }
+    .board { display: flex; gap: 14px; align-items: stretch; overflow-x: auto; padding-bottom: 8px; }
+    .col { flex: 1 1 0; min-width: 260px; min-height: 240px; background: var(--col);
+      border-radius: 14px; padding: 10px; display: flex; flex-direction: column;
+      outline: 2px dashed transparent; outline-offset: -4px; transition: outline-color .12s; }
+    .col.over { outline-color: var(--muted); }
     .col h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: .04em;
       color: var(--muted); margin: 4px 6px 10px; display: flex; justify-content: space-between; }
-    .col-body { display: flex; flex-direction: column; gap: 10px; min-height: 60px; border-radius: 10px; }
-    .col-body.over { outline: 2px dashed var(--muted); outline-offset: 2px; }
-    .col-empty { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 16px 0; }
+    .col-body { display: flex; flex-direction: column; gap: 10px; flex: 1 1 auto; border-radius: 10px; }
+    .col-empty { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 16px 0;
+      flex: 1 1 auto; display: flex; align-items: center; justify-content: center; }
 
     .card { background: var(--card); border-radius: 12px; padding: 12px 12px 10px;
       box-shadow: 0 1px 3px rgba(0,0,0,.10); cursor: grab; }
@@ -103,20 +106,27 @@
       card.addEventListener("dragend", () => card.classList.remove("dragging"));
     });
 
-    document.querySelectorAll(".col-body").forEach((col) => {
+    // Дроп-зона — вся колонка целиком (включая заголовок и пустое пространство),
+    // а не только список карточек, чтобы не приходилось целиться в карточки.
+    document.querySelectorAll(".col").forEach((col) => {
+      const body = col.querySelector(".col-body");
       col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("over"); });
-      col.addEventListener("dragleave", () => col.classList.remove("over"));
+      // dragleave срабатывает и при переходе на дочерние элементы — гасим подсветку
+      // только когда курсор реально ушёл за пределы колонки.
+      col.addEventListener("dragleave", (e) => {
+        if (!col.contains(e.relatedTarget)) col.classList.remove("over");
+      });
       col.addEventListener("drop", async (e) => {
         e.preventDefault();
         col.classList.remove("over");
         const id = e.dataTransfer.getData("text/plain");
         const card = document.querySelector(`.card[data-id="${id}"]`);
         if (!card) return;
-        const status = col.dataset.status;
-        if (card.parentElement === col) return; // тот же столбец — ничего не делаем
-        col.appendChild(card); // оптимистично двигаем, затем сохраняем и перерисовываем
-        if (await patch(`/status/${id}`, { status })) location.reload();
-        else location.reload();
+        const status = body.dataset.status;
+        if (card.parentElement === body) return; // та же колонка — ничего не делаем
+        body.appendChild(card); // оптимистично двигаем, затем сохраняем и перерисовываем
+        await patch(`/status/${id}`, { status });
+        location.reload();
       });
     });
 
