@@ -7,9 +7,13 @@ from datetime import date
 import anthropic
 from pydantic import BaseModel, Field
 
+from . import holidays as holidays_mod
 from .config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Приписка к заметке, когда дату считаем по календарю с погрешностью наблюдения луны.
+_APPROX_NOTE = "Дата может сдвинуться на ±1 день (зависит от наблюдения луны)."
 
 
 class ExtractedReminder(BaseModel):
@@ -49,6 +53,16 @@ class ExtractedReminder(BaseModel):
         "здоровье, документы), 'normal' (обычное дело) или 'low' (мелочь, «когда-нибудь», "
         "просто заметка без срока). По умолчанию 'normal'.",
     )
+    holiday: str | None = Field(
+        default=None,
+        description="Если событие привязано к известному празднику с «плавающей» датой, "
+        "укажи его ключ (иначе null). Точную дату НЕ вычисляй сам — её посчитает система. "
+        "Ключи: rosh_hashanah, yom_kippur, sukkot, hanukkah, tu_bishvat, purim, passover, "
+        "lag_baomer, shavuot (еврейские); islamic_new_year, ashura, mawlid, ramadan_start, "
+        "eid_al_fitr, eid_al_adha (исламские); easter_western, easter_orthodox (Пасха, "
+        "западная/православная). Например 'Рош-а-Шана' → rosh_hashanah, 'Курбан-байрам' "
+        "→ eid_al_adha, 'Пасха' → easter_orthodox.",
+    )
 
 
 SYSTEM = (
@@ -56,6 +70,11 @@ SYSTEM = (
     "напоминания. Извлекай суть кратко и по-русски. Относительные даты ('завтра', "
     "'в пятницу', 'через неделю') переводи в абсолютные, отсчитывая от сегодняшней даты, "
     "которую тебе дадут. Если даты нет — оставляй null, не выдумывай. "
+    "Праздники с «плавающей» датой (Рош-а-Шана, Йом-Кипур, Ханука, Песах, Пурим, "
+    "Рамадан, Курбан-байрам, Ураза-байрам, Пасха и т.п.) НЕ датируй сам — вместо этого "
+    "заполни поле holiday соответствующим ключом, а event_date оставь null: точную дату "
+    "по лунному/лунно-солнечному календарю посчитает система. Праздники с фиксированной "
+    "датой (Новый год 1 января, Рождество и т.п.) датируй как обычно. "
     "Даты на билетах/документах бери ровно как напечатано, вместе с годом, и НЕ подменяй "
     "год текущим. Двузначный год трактуй как 20XX (например '08.Jun.27' → 2027-06-08). "
     "Если день недели на билете указан (Mo/Di/Mi/Do/Fr/Sa/So или Mon/Tue/…), сверяй по нему "
@@ -68,10 +87,23 @@ SYSTEM = (
 )
 
 
+def _apply_holiday(extracted: ExtractedReminder, today: date) -> ExtractedReminder:
+    """Если модель опознала «плавающий» праздник — вычисляем его дату кодом."""
+    if not extracted.holiday:
+        return extracted
+    resolved = holidays_mod.resolve(extracted.holiday, today)
+    if resolved is None:
+        return extracted  # неизвестный/невычислимый ключ — оставляем что дала модель
+    extracted.event_date = resolved.isoformat()
+    if holidays_mod.is_approximate(extracted.holiday):
+        extracted.notes = f"{extracted.notes} {_APPROX_NOTE}".strip() if extracted.notes else _APPROX_NOTE
+    return extracted
+
+
 def _parse(content_blocks: list[dict]) -> ExtractedReminder:
-    today = date.today().isoformat()
+    today = date.today()
     content_blocks = [
-        {"type": "text", "text": f"Сегодня {today}. Разбери это в напоминание:"},
+        {"type": "text", "text": f"Сегодня {today.isoformat()}. Разбери это в напоминание:"},
         *content_blocks,
     ]
     response = client.messages.parse(
@@ -81,7 +113,7 @@ def _parse(content_blocks: list[dict]) -> ExtractedReminder:
         messages=[{"role": "user", "content": content_blocks}],
         output_format=ExtractedReminder,
     )
-    return response.parsed_output
+    return _apply_holiday(response.parsed_output, today)
 
 
 def structure_text(text: str) -> ExtractedReminder:
