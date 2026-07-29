@@ -1,12 +1,16 @@
 """Слой хранения: SQLite + SQLAlchemy. Одна таблица напоминаний."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 
 from sqlalchemy import String, Text, Date, DateTime, Boolean, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
 
+from . import links
 from .config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 engine = create_engine(DATABASE_URL, echo=False)
 
@@ -35,6 +39,9 @@ class Reminder(Base):
     event_time: Mapped[str | None] = mapped_column(String(20), nullable=True)
     location: Mapped[str | None] = mapped_column(String(300), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ссылка из сообщения (бронь, билет, страница события). Достаём регуляркой из
+    # текста, а не через LLM: это дословные данные, их нельзя пересказывать.
+    url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     # Служебные поля.
     source: Mapped[str] = mapped_column(String(20), default="text")  # text|voice|photo|pdf
@@ -82,6 +89,7 @@ def _migrate() -> None:
         "digest_milestone": "INTEGER",
         "status": "VARCHAR(20) DEFAULT 'todo'",
         "importance": "INTEGER DEFAULT 2",
+        "url": "VARCHAR(1000)",
     }
     with engine.begin() as conn:
         existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(reminders)")}
@@ -93,6 +101,27 @@ def _migrate() -> None:
         # Первичное заполнение status из старого флага done: выполненные -> 'done'.
         if "status" in added:
             conn.exec_driver_sql("UPDATE reminders SET status='done' WHERE done=1")
+    # Старые карточки писались без поля url, но текст сообщения сохранялся целиком —
+    # вытаскиваем ссылки из raw_text, чтобы ничего не пропало.
+    if "url" in added:
+        _backfill_urls()
+
+
+def _backfill_urls() -> None:
+    """Достаёт ссылки из raw_text у карточек, сохранённых до появления поля url."""
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(Reminder).where(Reminder.url.is_(None), Reminder.raw_text.is_not(None))
+        ).all()
+        filled = 0
+        for reminder in rows:
+            found = links.first_url(reminder.raw_text)
+            if found:
+                reminder.url = found
+                filled += 1
+        if filled:
+            session.commit()
+            logger.info("Backfill ссылок: заполнено %d карточек", filled)
 
 
 def add_reminder(**kwargs) -> Reminder:

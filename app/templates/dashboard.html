@@ -37,6 +37,9 @@
     .meta { color: var(--muted); font-size: 0.82rem; margin-top: 6px; }
     .notes { font-size: 0.82rem; margin-top: 6px; }
     .notes a { color: inherit; }
+    /* Длинная ссылка не должна распирать карточку. */
+    .link { overflow-wrap: anywhere; text-decoration: none; border-bottom: 1px solid var(--muted); }
+    .link:hover { border-bottom-color: currentColor; }
     .archive-btn { margin-top: 8px; border: none; background: transparent; color: var(--muted);
       cursor: pointer; font-size: 0.8rem; padding: 2px 0; }
     .archive-btn:hover { color: var(--fg); }
@@ -71,6 +74,10 @@
           </div>
           {% endif %}
           {% if r.notes %}<div class="notes">{{ r.notes }}</div>{% endif %}
+          {% if r.url %}
+          <div class="notes"><a class="link" href="{{ r.url }}" target="_blank"
+            rel="noopener noreferrer" draggable="false">🔗 {{ r.url|truncate(48, true, "…") }}</a></div>
+          {% endif %}
           {% if r.file_path %}<div class="notes"><a href="/file/{{ r.id }}">📎 Скачать файл</a></div>{% endif %}
           {% if key == "done" %}
           <button class="archive-btn" data-id="{{ r.id }}">🗄 В архив</button>

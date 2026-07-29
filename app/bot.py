@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
-import re
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -21,7 +20,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import db, llm, transcribe
+from . import db, links, llm, transcribe
 from .errors import report_error
 from .config import (
     DIGEST_CHAT_ID,
@@ -49,16 +48,6 @@ STATUS_TRANSITIONS = {
     "done": [("🗄 В архив", "archived"), ("↩️ Вернуть", "doing")],
 }
 
-_URL_RE = re.compile(r"https?://\S+")
-
-
-def _find_urls(text: str) -> list[str]:
-    """Находит ссылки в тексте и отрезает хвостовую пунктуацию."""
-    return [u.rstrip(").,;!?") for u in _URL_RE.findall(text)]
-
-
-def _is_pdf_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(".pdf")
 
 
 # --- Регулярные напоминания ---------------------------------------------------
@@ -184,13 +173,15 @@ def schedule_event_reminder(job_queue: JobQueue, reminder: db.Reminder) -> bool:
 def _digest_line(reminder: db.Reminder, *, with_date: bool = True) -> str:
     emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
     imp = IMPORTANCE_EMOJI.get(reminder.importance, "") if reminder.importance == 3 else ""
-    line = f"{imp}{' ' if imp else ''}{emoji} <b>{reminder.title}</b>"
+    line = f"{imp}{' ' if imp else ''}{emoji} <b>{html.escape(reminder.title)}</b>"
     if with_date and reminder.event_date:
         line += f" — {reminder.event_date.strftime('%d.%m')}"
     if reminder.event_time:
-        line += f" {reminder.event_time}"
+        line += f" {html.escape(reminder.event_time)}"
     if reminder.location:
-        line += f"\n   📍 {reminder.location}"
+        line += f"\n   📍 {html.escape(reminder.location)}"
+    if reminder.url:
+        line += f"\n   🔗 {html.escape(reminder.url)}"
     return line
 
 
@@ -343,6 +334,8 @@ def _save(
         event_time=extracted.event_time,
         location=extracted.location,
         notes=extracted.notes,
+        # Ссылку берём из исходного текста регуляркой — дословно, без участия модели.
+        url=links.first_url(raw_text),
         source=source,
         raw_text=raw_text,
         file_path=file_path,
@@ -382,16 +375,20 @@ def _confirmation(reminder: db.Reminder) -> str:
     emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
     imp = IMPORTANCE_EMOJI.get(reminder.importance, "")
     prefix = f"{imp} " if imp else ""
-    lines = [f"{prefix}{emoji} <b>{reminder.title}</b>"]
+    # Всё, что пришло от пользователя/модели, экранируем: parse_mode=HTML ломается
+    # на «&» и «<» (а в ссылках на бронь «&» в query-параметрах — норма).
+    lines = [f"{prefix}{emoji} <b>{html.escape(reminder.title)}</b>"]
     if reminder.event_date:
         when = reminder.event_date.strftime("%d.%m.%Y")
         if reminder.event_time:
-            when += f" в {reminder.event_time}"
+            when += f" в {html.escape(reminder.event_time)}"
         lines.append(f"🗓 {when}")
     if reminder.location:
-        lines.append(f"📍 {reminder.location}")
+        lines.append(f"📍 {html.escape(reminder.location)}")
     if reminder.notes:
-        lines.append(f"💬 {reminder.notes}")
+        lines.append(f"💬 {html.escape(reminder.notes)}")
+    if reminder.url:
+        lines.append(f"🔗 {html.escape(reminder.url)}")
     if _event_ping_time(reminder):
         lines.append("⏰ Напомню за день до события.")
     if reminder.recurrence and reminder.remind_active:
@@ -433,11 +430,13 @@ def _list_line(reminder: db.Reminder) -> str:
     """Одна карточка для /list: важность, категория, название, дата и статус."""
     emoji = CATEGORY_EMOJI.get(reminder.category, "📝")
     imp = IMPORTANCE_EMOJI.get(reminder.importance, "🟡")
-    line = f"{imp} {emoji} <b>{reminder.title}</b>"
+    line = f"{imp} {emoji} <b>{html.escape(reminder.title)}</b>"
     if reminder.event_date:
         line += f" — {reminder.event_date.strftime('%d.%m')}"
         if reminder.event_time:
-            line += f" {reminder.event_time}"
+            line += f" {html.escape(reminder.event_time)}"
+    if reminder.url:
+        line += f"\n🔗 {html.escape(reminder.url)}"
     line += f"\n<i>{STATUS_NAME.get(reminder.status, reminder.status)}</i>"
     return line
 
@@ -516,8 +515,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     await update.message.chat.send_action("typing")
 
-    urls = _find_urls(text)
-    pdf_urls = [u for u in urls if _is_pdf_url(u)]
+    urls = links.find_urls(text)
+    pdf_urls = [u for u in urls if links.is_pdf_url(u)]
 
     # Ссылка на PDF -> Claude читает файл по ссылке.
     if pdf_urls:

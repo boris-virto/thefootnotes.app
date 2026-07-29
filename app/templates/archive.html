@@ -21,6 +21,7 @@
     .emoji { font-size: 1.2rem; }
     .title { font-weight: 600; }
     .meta { color: var(--muted); font-size: 0.82rem; margin-top: 4px; }
+    .link { color: inherit; overflow-wrap: anywhere; }
     .restore { margin-left: auto; border: none; background: transparent; color: var(--muted);
       cursor: pointer; font-size: 0.85rem; }
     .restore:hover { color: var(--fg); }
@@ -42,6 +43,10 @@
         <div class="meta">
           {% if r.event_date %}🗓 {{ r.event_date.strftime("%d.%m.%Y") }} · {% endif %}{{ r.category }}
         </div>
+        {% if r.url %}
+        <div class="meta"><a class="link" href="{{ r.url }}" target="_blank"
+          rel="noopener noreferrer">🔗 {{ r.url|truncate(48, true, "…") }}</a></div>
+        {% endif %}
       </div>
       <button class="restore" data-id="{{ r.id }}" title="Вернуть в TODO">↩︎ вернуть</button>
     </div>

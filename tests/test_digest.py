@@ -9,11 +9,11 @@ from app import bot
 TODAY = date(2026, 7, 24)
 
 
-def _rem(title="t", days=None, importance=2, milestone=None, category="ticket"):
+def _rem(title="t", days=None, importance=2, milestone=None, category="ticket", url=None):
     ed = TODAY + timedelta(days=days) if days is not None else None
     return SimpleNamespace(
         id=abs(hash(title)) % 100000, title=title, category=category,
-        event_date=ed, event_time=None, location=None,
+        event_date=ed, event_time=None, location=None, url=url,
         importance=importance, digest_milestone=milestone,
     )
 
