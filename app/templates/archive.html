@@ -47,6 +47,13 @@
         <div class="meta"><a class="link" href="{{ r.url }}" target="_blank"
           rel="noopener noreferrer">🔗 {{ r.url|truncate(48, true, "…") }}</a></div>
         {% endif %}
+        {% set files = r.file_paths %}
+        {% if files %}
+        <div class="meta">📎
+          {% for _ in files %}<a class="link" href="/file/{{ r.id }}?n={{ loop.index0 }}">{{
+            "файл" if files|length == 1 else loop.index }}</a>{% if not loop.last %} · {% endif %}{% endfor %}
+        </div>
+        {% endif %}
       </div>
       <button class="restore" data-id="{{ r.id }}" title="Вернуть в TODO">↩︎ вернуть</button>
     </div>

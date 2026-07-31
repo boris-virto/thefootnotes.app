@@ -120,30 +120,40 @@ def structure_text(text: str) -> ExtractedReminder:
     return _parse([{"type": "text", "text": text}])
 
 
-def structure_image(image_bytes: bytes, media_type: str = "image/jpeg") -> ExtractedReminder:
-    data = base64.standard_b64encode(image_bytes).decode("utf-8")
-    return _parse(
-        [
-            {
-                "type": "text",
-                "text": "Это скриншот/фото (например, билет). Извлеки событие, дату, время, место.",
-            },
-            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
-        ]
-    )
+def _file_block(data_bytes: bytes, media_type: str) -> dict:
+    """Блок контента для одного файла: PDF идёт как document, картинка как image."""
+    data = base64.standard_b64encode(data_bytes).decode("utf-8")
+    kind = "document" if media_type == "application/pdf" else "image"
+    return {"type": kind, "source": {"type": "base64", "media_type": media_type, "data": data}}
 
 
-def structure_pdf(pdf_bytes: bytes) -> ExtractedReminder:
-    data = base64.standard_b64encode(pdf_bytes).decode("utf-8")
-    return _parse(
-        [
-            {"type": "text", "text": "Это PDF (например, билет или бронь). Извлеки суть."},
-            {
-                "type": "document",
-                "source": {"type": "base64", "media_type": "application/pdf", "data": data},
-            },
-        ]
+def structure_files(files: list[tuple[bytes, str]]) -> ExtractedReminder:
+    """Разбирает НЕСКОЛЬКО файлов как ОДНО напоминание.
+
+    Так приходит альбом из Telegram: два билета на один концерт — это одно
+    мероприятие, а не два. Отправляем все файлы в одном запросе, чтобы модель
+    видела их вместе и могла сама решить, одно это событие или разные.
+    """
+    if len(files) == 1:
+        data_bytes, media_type = files[0]
+        return _parse(
+            [
+                {"type": "text", "text": "Это билет/бронь (PDF или фото). Извлеки суть."},
+                _file_block(data_bytes, media_type),
+            ]
+        )
+    intro = (
+        f"Это {len(files)} файла из одного сообщения — скорее всего билеты на ОДНО "
+        "мероприятие (например, на двоих). Сделай ОДНО напоминание. "
+        "Если это действительно одно событие, укажи в notes количество билетов "
+        "и, если они различаются, места/категории. Разными событиями считай только "
+        "если даты или названия мероприятий явно не совпадают."
     )
+    blocks: list[dict] = [{"type": "text", "text": intro}]
+    for i, (data_bytes, media_type) in enumerate(files, start=1):
+        blocks.append({"type": "text", "text": f"Файл {i}:"})
+        blocks.append(_file_block(data_bytes, media_type))
+    return _parse(blocks)
 
 
 def structure_pdf_url(url: str) -> ExtractedReminder:

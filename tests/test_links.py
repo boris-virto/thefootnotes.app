@@ -51,7 +51,7 @@ def test_saved_reminder_keeps_url_from_raw_text():
            "https://www.belgradeturtle.com/service-page/belgrade-sunset-cruise")
     reminder = bot._save(
         ExtractedReminder(title="Забронировать круиз на закате"),
-        source="text", raw_text=raw, file_path=None, chat_id=1,
+        source="text", raw_text=raw, chat_id=1,
     )
     assert reminder.url == "https://www.belgradeturtle.com/service-page/belgrade-sunset-cruise"
 
@@ -61,7 +61,7 @@ def test_saved_reminder_without_link_has_no_url():
 
     reminder = bot._save(
         ExtractedReminder(title="Купить хлеб"),
-        source="text", raw_text="купить хлеб", file_path=None, chat_id=1,
+        source="text", raw_text="купить хлеб", chat_id=1,
     )
     assert reminder.url is None
 
@@ -86,7 +86,7 @@ def test_backfill_does_not_touch_existing_url():
     reminder = bot._save(
         ExtractedReminder(title="есть ссылка"),
         source="text", raw_text="a https://first.example b https://second.example",
-        file_path=None, chat_id=1,
+        chat_id=1,
     )
     assert reminder.url == "https://first.example"
     db._backfill_urls()
@@ -100,7 +100,7 @@ def test_rendered_lines_include_url_and_escape_ampersand():
 
     reminder = bot._save(
         ExtractedReminder(title="Круиз", event_date="2026-08-15"),
-        source="text", raw_text="бронь https://ex.com/b?a=1&b=2", file_path=None, chat_id=1,
+        source="text", raw_text="бронь https://ex.com/b?a=1&b=2", chat_id=1,
     )
     for rendered in (
         bot._confirmation(reminder),

@@ -247,13 +247,16 @@ async def done(request: Request, reminder_id: int):
 
 
 @app.get("/file/{reminder_id}")
-async def download_file(request: Request, reminder_id: int):
+async def download_file(request: Request, reminder_id: int, n: int = 0):
+    """Отдаёт n-й файл карточки (у одного мероприятия может быть несколько билетов)."""
     if redirect := _require_login(request):
         return redirect
     reminder = db.get_reminder(reminder_id)
-    if not reminder or not reminder.file_path:
+    paths = reminder.file_paths if reminder else []
+    if not paths or not 0 <= n < len(paths):
         raise HTTPException(status_code=404, detail="Файл не найден")
-    path = Path(reminder.file_path)
+    path = Path(paths[n])
     if not path.exists():
         raise HTTPException(status_code=404, detail="Файл больше недоступен")
-    return FileResponse(path, filename=f"{reminder.title}{path.suffix}")
+    suffix = f" ({n + 1})" if len(paths) > 1 else ""
+    return FileResponse(path, filename=f"{reminder.title}{suffix}{path.suffix}")

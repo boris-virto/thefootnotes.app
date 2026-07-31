@@ -20,8 +20,12 @@ from app import db  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    """Свежая пустая таблица перед каждым тестом (общая тестовая БД)."""
+    """Свежие пустые таблицы перед каждым тестом (общая тестовая БД).
+
+    Вложения чистим тоже: SQLite переиспользует id после опустошения таблицы, и
+    оставшиеся строки attachments прилипли бы к новым карточкам."""
     db.init_db()
     with db.engine.begin() as conn:
+        conn.exec_driver_sql("DELETE FROM attachments")
         conn.exec_driver_sql("DELETE FROM reminders")
     yield

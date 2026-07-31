@@ -6,6 +6,7 @@ import html
 import logging
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -321,12 +322,14 @@ def _save(
     *,
     source: str,
     raw_text: str | None,
-    file_path: str | None,
     chat_id: int,
+    file_path: str | None = None,
+    file_paths: list[str] | None = None,
 ):
     recurrence = extracted.recurrence
     remind_time = extracted.remind_time or (DEFAULT_REMIND_TIME if recurrence else None)
     importance = IMPORTANCE_FROM_LLM.get((extracted.importance or "normal").lower(), 2)
+    paths = list(file_paths) if file_paths else ([file_path] if file_path else [])
     return db.add_reminder(
         title=extracted.title,
         category=extracted.category or "note",
@@ -338,7 +341,7 @@ def _save(
         url=links.first_url(raw_text),
         source=source,
         raw_text=raw_text,
-        file_path=file_path,
+        file_paths=paths,
         chat_id=chat_id,
         recurrence=recurrence,
         remind_time=remind_time,
@@ -347,22 +350,25 @@ def _save(
 
 
 async def _save_and_schedule(
-    update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     extracted: ExtractedReminder,
     *,
+    chat_id: int,
     source: str,
     raw_text: str | None = None,
     file_path: str | None = None,
+    file_paths: list[str] | None = None,
 ) -> db.Reminder:
-    """Сохраняет напоминание и, если оно регулярное, ставит задачу в расписание."""
+    """Сохраняет напоминание и, если оно регулярное, ставит задачу в расписание.
+    chat_id передаём явно: для альбома сохранение идёт из job-колбэка, где Update нет."""
     reminder = await asyncio.to_thread(
         _save,
         extracted,
         source=source,
         raw_text=raw_text,
         file_path=file_path,
-        chat_id=update.effective_chat.id,
+        file_paths=file_paths,
+        chat_id=chat_id,
     )
     if reminder.recurrence and reminder.remind_active:
         schedule_reminder(context.application.job_queue, reminder)
@@ -523,7 +529,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = pdf_urls[0]
         try:
             extracted = await asyncio.to_thread(llm.structure_pdf_url, url)
-            reminder = await _save_and_schedule(update, context, extracted, source="pdf", raw_text=url)
+            reminder = await _save_and_schedule(
+                context, extracted, chat_id=update.effective_chat.id,
+                source="pdf", raw_text=url,
+            )
         except Exception as e:
             await report_error(
                 update, context, e, where="pdf-url",
@@ -545,7 +554,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Обычный текст (в т.ч. заметка со ссылкой внутри).
     try:
         extracted = await asyncio.to_thread(llm.structure_text, text)
-        reminder = await _save_and_schedule(update, context, extracted, source="text", raw_text=text)
+        reminder = await _save_and_schedule(
+            context, extracted, chat_id=update.effective_chat.id, source="text", raw_text=text,
+        )
     except Exception as e:
         await report_error(
             update, context, e, where="text",
@@ -593,7 +604,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     try:
         extracted = await asyncio.to_thread(llm.structure_text, text)
-        reminder = await _save_and_schedule(update, context, extracted, source="voice", raw_text=text)
+        reminder = await _save_and_schedule(
+            context, extracted, chat_id=update.effective_chat.id, source="voice", raw_text=text,
+        )
     except Exception as e:
         await report_error(
             update, context, e, where="voice-structure",
@@ -606,25 +619,119 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# --- Файлы: фото и PDF, в том числе альбомом -----------------------------------
+
+# Альбом («2 билета одним сообщением») Telegram присылает НЕСКОЛЬКИМИ апдейтами с
+# общим media_group_id. Копим их и разбираем вместе, иначе на одно мероприятие
+# создастся столько карточек, сколько файлов. Ждём паузу после последнего файла.
+MEDIA_GROUP_DELAY = 3.0  # секунд
+_media_groups: dict[str, dict] = {}
+
+
+async def _download(context: ContextTypes.DEFAULT_TYPE, file_id: str, path: Path) -> bytes:
+    tg_file = await context.bot.get_file(file_id)
+    data = bytes(await tg_file.download_as_bytearray())
+    await asyncio.to_thread(path.write_bytes, data)
+    return data
+
+
+async def _handle_incoming_file(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    file_id: str,
+    path: Path,
+    media_type: str,
+    source: str,
+    where: str,
+    user_message: str,
+) -> None:
+    """Общий путь для фото и PDF: скачать, а дальше либо копить альбом, либо разобрать."""
+    message = update.message
+    try:
+        data = await _download(context, file_id, path)
+    except Exception as e:
+        await report_error(update, context, e, where=f"{where}-download", user_message=user_message)
+        return
+
+    group_id = message.media_group_id
+    if group_id:
+        group = _media_groups.setdefault(
+            group_id,
+            {"files": [], "chat_id": update.effective_chat.id, "message": message,
+             "captions": [], "source": source},
+        )
+        group["files"].append((data, media_type, str(path)))
+        if message.caption:
+            group["captions"].append(message.caption)
+        # Дебаунс: каждый новый файл сдвигает разбор, чтобы дождаться всего альбома.
+        name = f"mg:{group_id}"
+        for job in context.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
+        context.job_queue.run_once(
+            _process_media_group, MEDIA_GROUP_DELAY, data=group_id, name=name
+        )
+        return
+
+    await message.chat.send_action("typing")
+    try:
+        extracted = await asyncio.to_thread(llm.structure_files, [(data, media_type)])
+        reminder = await _save_and_schedule(
+            context, extracted, chat_id=update.effective_chat.id,
+            source=source, raw_text=message.caption, file_paths=[str(path)],
+        )
+    except Exception as e:
+        await report_error(update, context, e, where=where, user_message=user_message)
+        return
+    await message.reply_text(_confirmation(reminder), parse_mode="HTML")
+
+
+async def _process_media_group(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Разбирает накопленный альбом одним запросом — одно мероприятие, N билетов."""
+    group_id = context.job.data
+    group = _media_groups.pop(group_id, None)
+    if not group:
+        return
+    message = group["message"]
+    files = group["files"]
+    caption = "\n".join(group["captions"]) or None
+    fake_update = SimpleNamespace(  # для report_error: нужны user и message
+        effective_user=message.from_user, effective_message=message, message=message,
+        effective_chat=message.chat,
+    )
+    try:
+        await message.chat.send_action("typing")
+        extracted = await asyncio.to_thread(
+            llm.structure_files, [(data, mt) for data, mt, _ in files]
+        )
+        reminder = await _save_and_schedule(
+            context, extracted, chat_id=group["chat_id"], source=group["source"],
+            raw_text=caption, file_paths=[p for _, _, p in files],
+        )
+    except Exception as e:
+        await report_error(
+            fake_update, context, e, where="media-group",
+            user_message=f"📎 Получил {len(files)} файла, но не смог разобрать их в "
+            "напоминание. Попробуй прислать по одному.",
+        )
+        return
+    note = f"📎 Файлов: {len(files)} — сохранил одной карточкой.\n\n"
+    await message.reply_text(note + _confirmation(reminder), parse_mode="HTML")
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
-    await update.message.chat.send_action("typing")
     photo = update.message.photo[-1]  # самое большое разрешение
-    try:
-        tg_file = await context.bot.get_file(photo.file_id)
-        image = bytes(await tg_file.download_as_bytearray())
-        path = FILES_DIR / f"{photo.file_unique_id}.jpg"
-        path.write_bytes(image)
-        extracted = await asyncio.to_thread(llm.structure_image, image, "image/jpeg")
-        reminder = await _save_and_schedule(update, context, extracted, source="photo", file_path=str(path))
-    except Exception as e:
-        await report_error(
-            update, context, e, where="photo",
-            user_message="🖼 Не смог разобрать фото. Попробуй ещё раз или пришли текстом.",
-        )
-        return
-    await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
+    await _handle_incoming_file(
+        update, context,
+        file_id=photo.file_id,
+        path=FILES_DIR / f"{photo.file_unique_id}.jpg",
+        media_type="image/jpeg",
+        source="photo",
+        where="photo",
+        user_message="🖼 Не смог разобрать фото. Попробуй ещё раз или пришли текстом.",
+    )
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,21 +741,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if doc.mime_type != "application/pdf":
         await update.message.reply_text("Пока умею читать только PDF из документов.")
         return
-    await update.message.chat.send_action("typing")
-    try:
-        tg_file = await context.bot.get_file(doc.file_id)
-        pdf = bytes(await tg_file.download_as_bytearray())
-        path = FILES_DIR / f"{doc.file_unique_id}.pdf"
-        path.write_bytes(pdf)
-        extracted = await asyncio.to_thread(llm.structure_pdf, pdf)
-        reminder = await _save_and_schedule(update, context, extracted, source="pdf", file_path=str(path))
-    except Exception as e:
-        await report_error(
-            update, context, e, where="pdf-document",
-            user_message="📄 Не смог прочитать PDF. Попробуй ещё раз или пришли другой файл.",
-        )
-        return
-    await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
+    await _handle_incoming_file(
+        update, context,
+        file_id=doc.file_id,
+        path=FILES_DIR / f"{doc.file_unique_id}.pdf",
+        media_type="application/pdf",
+        source="pdf",
+        where="pdf-document",
+        user_message="📄 Не смог прочитать PDF. Попробуй ещё раз или пришли другой файл.",
+    )
 
 
 async def reminders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,12 +798,15 @@ async def files_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     for r in items:
         emoji = CATEGORY_EMOJI.get(r.category, "📝")
+        count = len(r.file_paths)
+        label = "📎 Скачать" if count <= 1 else f"📎 Скачать все ({count})"
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📎 Скачать", callback_data=f"file:{r.id}")]]
+            [[InlineKeyboardButton(label, callback_data=f"file:{r.id}")]]
         )
-        await update.message.reply_text(
-            f"{emoji} <b>{r.title}</b>", parse_mode="HTML", reply_markup=keyboard
-        )
+        title = f"{emoji} <b>{html.escape(r.title)}</b>"
+        if count > 1:
+            title += f"\n<i>файлов: {count}</i>"
+        await update.message.reply_text(title, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def on_send_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -712,18 +816,29 @@ async def on_send_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     reminder_id = int(query.data.split(":", 1)[1])
     reminder = await asyncio.to_thread(db.get_reminder, reminder_id)
-    if not reminder or not reminder.file_path:
+    paths = [Path(p) for p in reminder.file_paths] if reminder else []
+    if not paths:
         await context.bot.send_message(query.message.chat_id, "Файл не найден.")
         return
-    path = Path(reminder.file_path)
-    if not path.exists():
+    existing = [p for p in paths if p.exists()]
+    if not existing:
         await context.bot.send_message(
             query.message.chat_id, "Файл больше недоступен на сервере."
         )
         return
-    data = await asyncio.to_thread(path.read_bytes)
-    filename = f"{reminder.title}{path.suffix}"
-    await context.bot.send_document(query.message.chat_id, document=data, filename=filename)
+    # У карточки может быть несколько билетов — отдаём все.
+    for i, path in enumerate(existing, start=1):
+        data = await asyncio.to_thread(path.read_bytes)
+        suffix = f" ({i})" if len(existing) > 1 else ""
+        await context.bot.send_document(
+            query.message.chat_id, document=data,
+            filename=f"{reminder.title}{suffix}{path.suffix}",
+        )
+    if len(existing) < len(paths):
+        await context.bot.send_message(
+            query.message.chat_id,
+            f"⚠️ {len(paths) - len(existing)} из {len(paths)} файлов уже недоступны на сервере.",
+        )
 
 
 # Список команд для автодополнения по «/» и кнопки «Меню» в клиенте Telegram.

@@ -4,8 +4,12 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
-from sqlalchemy import String, Text, Date, DateTime, Boolean, create_engine, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, Session
+from sqlalchemy import (
+    Boolean, Date, DateTime, ForeignKey, String, Text, create_engine, select,
+)
+from sqlalchemy.orm import (
+    DeclarativeBase, Mapped, Session, mapped_column, relationship, selectinload,
+)
 
 from . import links
 from .config import DATABASE_URL
@@ -27,6 +31,24 @@ class Base(DeclarativeBase):
     pass
 
 
+class Attachment(Base):
+    """Файл, приложенный к напоминанию. Их может быть несколько: например, два
+    билета на одно и то же мероприятие приходят альбомом одним сообщением."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reminder_id: Mapped[int] = mapped_column(
+        ForeignKey("reminders.id", ondelete="CASCADE"), index=True
+    )
+    path: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+    reminder: Mapped["Reminder"] = relationship(back_populates="attachments")
+
+
 class Reminder(Base):
     __tablename__ = "reminders"
 
@@ -46,7 +68,9 @@ class Reminder(Base):
     # Служебные поля.
     source: Mapped[str] = mapped_column(String(20), default="text")  # text|voice|photo|pdf
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # исходный текст/транскрипт
-    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)  # сохранённый файл
+    # Первый приложенный файл. Источник правды — таблица attachments; это поле
+    # держится синхронным с attachments[0] (как done со status) для простых запросов.
+    file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # Статус на доске задач и приоритет. done оставлен для обратной совместимости и
     # держится синхронным со status (done := status in {done, archived}).
@@ -68,6 +92,21 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
+
+    # Загружаем всегда жадно (selectinload в запросах ниже): объекты Reminder живут
+    # дольше своей сессии, и ленивая подгрузка упала бы с DetachedInstanceError.
+    attachments: Mapped[list[Attachment]] = relationship(
+        back_populates="reminder",
+        cascade="all, delete-orphan",
+        order_by="Attachment.id",
+    )
+
+    @property
+    def file_paths(self) -> list[str]:
+        """Пути ко всем приложенным файлам (у старых карточек — из file_path)."""
+        if self.attachments:
+            return [a.path for a in self.attachments]
+        return [self.file_path] if self.file_path else []
 
 
 def init_db() -> None:
@@ -105,6 +144,26 @@ def _migrate() -> None:
     # вытаскиваем ссылки из raw_text, чтобы ничего не пропало.
     if "url" in added:
         _backfill_urls()
+    _backfill_attachments()
+
+
+def _backfill_attachments() -> None:
+    """Переносит одиночный file_path старых карточек в таблицу вложений.
+    Идемпотентно: карточки, у которых вложения уже есть, не трогаем."""
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(Reminder)
+            .options(selectinload(Reminder.attachments))
+            .where(Reminder.file_path.is_not(None))
+        ).all()
+        added = 0
+        for reminder in rows:
+            if not reminder.attachments:
+                reminder.attachments.append(Attachment(path=reminder.file_path))
+                added += 1
+        if added:
+            session.commit()
+            logger.info("Backfill вложений: перенесено %d файлов", added)
 
 
 def _backfill_urls() -> None:
@@ -124,13 +183,42 @@ def _backfill_urls() -> None:
             logger.info("Backfill ссылок: заполнено %d карточек", filled)
 
 
-def add_reminder(**kwargs) -> Reminder:
+def _eager():
+    """Вложения всегда подгружаем вместе с напоминанием: возвращаемые объекты
+    переживают свою сессию, ленивая подгрузка дала бы DetachedInstanceError."""
+    return selectinload(Reminder.attachments)
+
+
+def add_reminder(file_paths: list[str] | None = None, **kwargs) -> Reminder:
+    """Создаёт напоминание. file_paths — все приложенные файлы (альбом = несколько);
+    file_path держим синхронным с первым из них."""
+    paths = list(file_paths or ([kwargs["file_path"]] if kwargs.get("file_path") else []))
+    kwargs["file_path"] = paths[0] if paths else None
     with Session(engine) as session:
         reminder = Reminder(**kwargs)
+        reminder.attachments = [Attachment(path=p) for p in paths]
         session.add(reminder)
         session.commit()
+        # commit() просрочил все атрибуты: обновляем колонки и трогаем связь, пока
+        # сессия ещё открыта, иначе снаружи получим DetachedInstanceError.
         session.refresh(reminder)
+        _ = reminder.attachments
         return reminder
+
+
+def add_attachments(reminder_id: int, paths: list[str]) -> None:
+    """Досыпает файлы к существующей карточке (и синхронизирует file_path)."""
+    if not paths:
+        return
+    with Session(engine) as session:
+        reminder = session.get(Reminder, reminder_id, options=[_eager()])
+        if not reminder:
+            return
+        for path in paths:
+            reminder.attachments.append(Attachment(path=path))
+        if not reminder.file_path:
+            reminder.file_path = reminder.attachments[0].path
+        session.commit()
 
 
 def sort_reminders(items: list[Reminder]) -> list[Reminder]:
@@ -144,7 +232,7 @@ def sort_reminders(items: list[Reminder]) -> list[Reminder]:
 
 def _list_by_status(statuses: tuple[str, ...]) -> list[Reminder]:
     with Session(engine) as session:
-        stmt = select(Reminder).where(Reminder.status.in_(statuses))
+        stmt = select(Reminder).options(_eager()).where(Reminder.status.in_(statuses))
         return sort_reminders(list(session.scalars(stmt)))
 
 
@@ -167,6 +255,7 @@ def list_archived() -> list[Reminder]:
     with Session(engine) as session:
         stmt = (
             select(Reminder)
+            .options(_eager())
             .where(Reminder.status == "archived")
             .order_by(Reminder.created_at.desc())
         )
@@ -199,13 +288,13 @@ def mark_done(reminder_id: int) -> None:
 
 def get_reminder(reminder_id: int) -> Reminder | None:
     with Session(engine) as session:
-        return session.get(Reminder, reminder_id)
+        return session.get(Reminder, reminder_id, options=[_eager()])
 
 
 def list_active_recurring() -> list[Reminder]:
     """Все включённые регулярные напоминания — их надо (пере)ставить в расписание."""
     with Session(engine) as session:
-        stmt = select(Reminder).where(
+        stmt = select(Reminder).options(_eager()).where(
             Reminder.recurrence.is_not(None),
             Reminder.remind_active == True,  # noqa: E712
         )
@@ -217,7 +306,7 @@ def list_upcoming_events() -> list[Reminder]:
     для них надо (пере)ставить пинг «за день до» после перезапуска."""
     today = date.today()
     with Session(engine) as session:
-        stmt = select(Reminder).where(
+        stmt = select(Reminder).options(_eager()).where(
             Reminder.event_date.is_not(None),
             Reminder.status.in_(ACTIVE_STATUSES),
             Reminder.chat_id.is_not(None),
@@ -231,6 +320,7 @@ def list_with_files() -> list[Reminder]:
     with Session(engine) as session:
         stmt = (
             select(Reminder)
+            .options(_eager())
             .where(Reminder.file_path.is_not(None))
             .order_by(Reminder.created_at.desc())
         )
