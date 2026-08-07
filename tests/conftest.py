@@ -26,6 +26,17 @@ def clean_db():
     оставшиеся строки attachments прилипли бы к новым карточкам."""
     db.init_db()
     with db.engine.begin() as conn:
-        conn.exec_driver_sql("DELETE FROM attachments")
-        conn.exec_driver_sql("DELETE FROM reminders")
+        for table in ("attachments", "reminders", "device_tokens", "pairing_codes"):
+            conn.exec_driver_sql(f"DELETE FROM {table}")
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_scheduler():
+    """Планировщик напоминаний живёт в боте; в тестах его нет — сбрасываем, чтобы
+    хук, поставленный одним тестом, не протёк в остальные."""
+    from app import ingest
+
+    ingest.set_scheduler(None)
+    yield
+    ingest.set_scheduler(None)

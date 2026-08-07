@@ -21,12 +21,29 @@
     p { color: #888; font-size: 0.9rem; margin: 0 0 24px; }
     .widget { display: flex; justify-content: center; min-height: 46px; }
     .note { color: #999; font-size: 0.8rem; margin-top: 20px; }
+
+    /* Вход по коду из бота — тот же механизм, что и привязка мобильного клиента.
+       Запасной путь, не зависящий от редиректа на oauth.telegram.org. */
+    .or { display: flex; align-items: center; gap: 10px; color: #bbb;
+      font-size: 0.75rem; text-transform: uppercase; letter-spacing: .06em; margin: 22px 0 16px; }
+    .or::before, .or::after { content: ""; flex: 1; height: 1px; background: currentColor; opacity: .4; }
+    form { display: flex; flex-direction: column; gap: 10px; }
+    input { font: inherit; font-size: 1.15rem; letter-spacing: .12em; text-align: center;
+      text-transform: uppercase; padding: 12px; border-radius: 10px; min-height: 48px;
+      border: 1px solid #ccc; background: transparent; color: inherit; }
+    @media (prefers-color-scheme: dark) { input { border-color: #444; } }
+    button { font: inherit; min-height: 48px; padding: 12px; border-radius: 10px; border: none;
+      background: #1c1c1c; color: #f4f1ea; cursor: pointer; }
+    @media (prefers-color-scheme: dark) { button { background: #f4f1ea; color: #1c1c1c; } }
+    .error { color: #c0392b; font-size: 0.85rem; margin: 0 0 16px; }
   </style>
 </head>
 <body>
   <div class="box">
     <h1>📌 Мои напоминания</h1>
     <p>Войди через Telegram, чтобы открыть дашборд.</p>
+
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
 
     <div class="widget">
       {% if bot_username %}
@@ -41,7 +58,17 @@
       {% endif %}
     </div>
 
-    <div class="note">Доступ открыт только разрешённым аккаунтам.</div>
+    <div class="or">или по коду</div>
+
+    <form method="post" action="/login/code">
+      <input name="code" placeholder="XXXX-XXXX" autocomplete="one-time-code"
+        autocapitalize="characters" autocorrect="off" spellcheck="false"
+        inputmode="latin" maxlength="9" required aria-label="Код из бота">
+      <button type="submit">Войти по коду</button>
+    </form>
+
+    <div class="note">Код выдаёт бот по команде /pair. Действует 10 минут.<br>
+      Доступ открыт только разрешённым аккаунтам.</div>
   </div>
 </body>
 </html>

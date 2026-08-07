@@ -2,7 +2,7 @@
 import pytest
 from sqlalchemy import text
 
-from app import bot, db, links
+from app import bot, db, ingest, links
 
 
 @pytest.mark.parametrize(
@@ -49,7 +49,7 @@ def test_saved_reminder_keeps_url_from_raw_text():
 
     raw = ("Напомни забронировать это на один из выходных в августе\n\n"
            "https://www.belgradeturtle.com/service-page/belgrade-sunset-cruise")
-    reminder = bot._save(
+    reminder = ingest.save_extracted(
         ExtractedReminder(title="Забронировать круиз на закате"),
         source="text", raw_text=raw, chat_id=1,
     )
@@ -59,7 +59,7 @@ def test_saved_reminder_keeps_url_from_raw_text():
 def test_saved_reminder_without_link_has_no_url():
     from app.llm import ExtractedReminder
 
-    reminder = bot._save(
+    reminder = ingest.save_extracted(
         ExtractedReminder(title="Купить хлеб"),
         source="text", raw_text="купить хлеб", chat_id=1,
     )
@@ -71,9 +71,10 @@ def test_backfill_recovers_url_from_old_rows():
     with db.engine.begin() as conn:
         conn.execute(
             text("INSERT INTO reminders (title, category, status, importance, done, "
-                 "source, raw_text, url, remind_active, created_at) "
+                 "source, raw_text, url, remind_active, created_at, updated_at) "
                  "VALUES ('старая', 'task', 'todo', 2, 0, 'text', "
-                 "'бронь https://old.example/x?a=1&b=2 тут', NULL, 1, '2026-01-01 00:00:00')")
+                 "'бронь https://old.example/x?a=1&b=2 тут', NULL, 1, "
+                 "'2026-01-01 00:00:00', '2026-01-01 00:00:00')")
         )
     db._backfill_urls()
     saved = [r for r in db.list_board() if r.title == "старая"]
@@ -83,7 +84,7 @@ def test_backfill_recovers_url_from_old_rows():
 def test_backfill_does_not_touch_existing_url():
     from app.llm import ExtractedReminder
 
-    reminder = bot._save(
+    reminder = ingest.save_extracted(
         ExtractedReminder(title="есть ссылка"),
         source="text", raw_text="a https://first.example b https://second.example",
         chat_id=1,
@@ -98,7 +99,7 @@ def test_rendered_lines_include_url_and_escape_ampersand():
     from app.llm import ExtractedReminder
     from datetime import date
 
-    reminder = bot._save(
+    reminder = ingest.save_extracted(
         ExtractedReminder(title="Круиз", event_date="2026-08-15"),
         source="text", raw_text="бронь https://ex.com/b?a=1&b=2", chat_id=1,
     )

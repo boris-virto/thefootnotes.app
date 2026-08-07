@@ -200,8 +200,9 @@ def test_legacy_card_exposes_its_single_file():
     with db.engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO reminders (title, category, status, importance, done, source, "
-            "file_path, remind_active, created_at) VALUES ('старая','ticket','todo',2,0,"
-            "'pdf','/old/ticket.pdf',1,'2026-01-01 00:00:00')"
+            "file_path, remind_active, created_at, updated_at) "
+            "VALUES ('старая','ticket','todo',2,0,"
+            "'pdf','/old/ticket.pdf',1,'2026-01-01 00:00:00','2026-01-01 00:00:00')"
         ))
     old = [r for r in db.list_board() if r.title == "старая"][0]
     assert old.file_paths == ["/old/ticket.pdf"]

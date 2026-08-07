@@ -3,8 +3,10 @@
 Бот работает в режиме polling и запускается вместе с веб-сервером через lifespan FastAPI,
 поэтому в облаке достаточно развернуть один сервис.
 
-Доступ к дашборду — через вход по Telegram (Login Widget): вместо пароля в nginx
-пользователь логинится своим телеграм-аккаунтом, а мы сверяем его id с ALLOWED_USER_IDS.
+Доступ к дашборду — двумя путями. В браузере: вход по Telegram (Login Widget), id
+сверяется с ALLOWED_USER_IDS. Вторым путём — одноразовый код из бота (`/pair`): тот же
+механизм, которым авторизуется мобильный клиент через /api/v1/pair, и запасной вход,
+когда Login Widget недоступен.
 """
 from __future__ import annotations
 
@@ -12,16 +14,18 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db
+from . import db, ingest, tokens
+from .api import COLUMNS, router as api_router
 from .auth import verify_telegram_login
 from .bot import (
     CATEGORY_EMOJI,
     build_application,
+    build_scheduler,
     schedule_digest,
     schedule_event_reminder,
     schedule_reminder,
@@ -49,12 +53,15 @@ async def lifespan(app: FastAPI):
     db.init_db()
 
     tg_app = None
-    app.state.bot_username = None
     if TELEGRAM_BOT_TOKEN:
         tg_app = build_application()
         await tg_app.initialize()
         await tg_app.start()
         await tg_app.updater.start_polling()
+
+        # Карточки создаются и из API — планировщик живёт в боте, поэтому отдаём его
+        # слою захвата, чтобы напоминания ставились независимо от источника карточки.
+        ingest.set_scheduler(build_scheduler(tg_app.job_queue))
 
         # Имя бота нужно для кнопки входа Telegram Login Widget.
         me = await tg_app.bot.get_me()
@@ -89,6 +96,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        ingest.set_scheduler(None)
         if tg_app:
             await tg_app.updater.stop()
             await tg_app.stop()
@@ -97,6 +105,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+# Имя бота узнаём при старте (нужно кнопке Telegram Login Widget). Значение по умолчанию
+# ставим здесь, чтобы страница входа открывалась даже когда бот не поднялся: вход по коду
+# от Login Widget не зависит и должен работать всегда.
+app.state.bot_username = None
 # Сессия в подписанной куке (HttpOnly, Secure).
 # SameSite=None обязателен: Telegram Login Widget возвращает пользователя на /auth/telegram
 # редиректом из своего домена (oauth.telegram.org) — при Lax браузер не отдаёт куку на
@@ -109,6 +121,8 @@ app.add_middleware(
     same_site="none",
     max_age=30 * 24 * 60 * 60,  # держим вход месяц
 )
+
+app.include_router(api_router)
 
 
 def _logged_in(request: Request) -> bool:
@@ -135,6 +149,31 @@ async def login(request: Request):
         "login.html",
         {"bot_username": request.app.state.bot_username},
     )
+
+
+@app.post("/login/code", response_class=HTMLResponse)
+async def login_with_code(request: Request, code: str = Form(...)):
+    """Вход по одноразовому коду из бота (`/pair`).
+
+    Тот же код, которым мобильный клиент получает токен в /api/v1/pair. Для дашборда
+    это запасной вход, не зависящий от Login Widget: он уходит редиректом на
+    oauth.telegram.org, а такой переход работает не в любом окружении.
+    """
+    found = tokens.consume_code(code)
+    if found is None:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "bot_username": request.app.state.bot_username,
+                "error": "Код неверный или истёк. Попроси новый: /pair в боте.",
+            },
+            status_code=400,
+        )
+    uid, name = found
+    request.session["uid"] = uid
+    request.session["name"] = name or str(uid)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/auth/telegram")
@@ -164,12 +203,13 @@ async def logout(request: Request):
 # --- Дашборд (требует входа) -------------------------------------------------
 
 
-COLUMNS = [
-    ("todo", "TODO"),
-    ("doing", "В процессе"),
-    ("done", "Сделано"),
-]
+# COLUMNS живут в app/api.py: у доски в браузере и в мобильном клиенте должны быть
+# одни и те же колонки с одинаковыми подписями.
 IMPORTANCE_EMOJI = {3: "🔴", 2: "🟡", 1: "🟢"}
+
+# Короткие подписи для кнопок переноса прямо на карточке: на телефоне кнопка занимает
+# треть ширины карточки, полное название колонки туда не влезает.
+STATUS_SHORT = {"todo": "TODO", "doing": "В работе", "done": "Готово"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -186,6 +226,7 @@ async def dashboard(request: Request):
         {
             "columns": columns,
             "column_defs": COLUMNS,
+            "status_short": STATUS_SHORT,
             "emoji": CATEGORY_EMOJI,
             "importance_emoji": IMPORTANCE_EMOJI,
             "user_name": request.session.get("name"),

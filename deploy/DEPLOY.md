@@ -87,7 +87,11 @@ ALLOWED_USER_IDS=130359870
 ANTHROPIC_MODEL=claude-haiku-4-5
 TIMEZONE=Europe/Belgrade
 DATA_DIR=data
+PUBLIC_URL=https://thefootnotes.app
 ```
+
+`PUBLIC_URL` нужен только для удобства: бот подставляет его в ссылку на вход с телефона
+(команда `/pair`). Без него команда всё равно работает, просто без готовой ссылки.
 
 Закрыть доступ:
 

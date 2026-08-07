@@ -43,6 +43,10 @@ SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip() or hashlib.sha256(
     f"session:{TELEGRAM_BOT_TOKEN}".encode()
 ).hexdigest()
 
+# Публичный адрес дашборда (без слэша на конце), напр. https://thefootnotes.app.
+# Нужен, чтобы бот мог дать в чате готовую ссылку на вход с телефона.
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 FILES_DIR = DATA_DIR / "files"
 DB_PATH = DATA_DIR / "thefootnotes.db"

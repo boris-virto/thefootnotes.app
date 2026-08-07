@@ -1,11 +1,11 @@
-"""Слой хранения: SQLite + SQLAlchemy. Одна таблица напоминаний."""
+"""Слой хранения: SQLite + SQLAlchemy. Напоминания, вложения и доступ устройств."""
 from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, ForeignKey, String, Text, create_engine, select,
+    Boolean, Date, DateTime, ForeignKey, String, Text, create_engine, delete, select,
 )
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, Session, mapped_column, relationship, selectinload,
@@ -27,6 +27,10 @@ VALID_STATUSES = ("todo", "doing", "done", "archived")
 IMPORTANCE_LOW, IMPORTANCE_NORMAL, IMPORTANCE_HIGH = 1, 2, 3
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -42,9 +46,7 @@ class Attachment(Base):
         ForeignKey("reminders.id", ondelete="CASCADE"), index=True
     )
     path: Mapped[str] = mapped_column(String(500))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     reminder: Mapped["Reminder"] = relationship(back_populates="attachments")
 
@@ -89,9 +91,10 @@ class Reminder(Base):
     # не терялись при пропущенной рассылке и не повторялись каждый день.
     digest_milestone: Mapped[int | None] = mapped_column(nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Время последнего изменения карточки. Нужно мобильному клиенту: он спрашивает
+    # «что поменялось после X» вместо того, чтобы каждый раз тянуть всю доску.
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
     # Загружаем всегда жадно (selectinload в запросах ниже): объекты Reminder живут
     # дольше своей сессии, и ленивая подгрузка упала бы с DetachedInstanceError.
@@ -107,6 +110,41 @@ class Reminder(Base):
         if self.attachments:
             return [a.path for a in self.attachments]
         return [self.file_path] if self.file_path else []
+
+
+class DeviceToken(Base):
+    """Долгий токен доступа для устройства (приложение на iPhone, шорткат iOS).
+
+    Храним только sha256 от токена: если база утечёт, восстановить сам токен нельзя.
+    """
+
+    __tablename__ = "device_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(index=True)  # telegram user id владельца
+    name: Mapped[str] = mapped_column(String(100), default="устройство")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PairingCode(Base):
+    """Одноразовый код, который бот выдаёт в чат, чтобы привязать устройство.
+
+    Обмен кода на токен — единственный способ впустить клиента: пароль вводить негде,
+    а Telegram Login Widget не работает внутри приложения (редирект уводит в Safari).
+    """
+
+    __tablename__ = "pairing_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(index=True)
+    # Имя владельца на момент выдачи кода: вход по коду должен приветствовать так же,
+    # как вход через Telegram, а имени в самом коде взяться неоткуда.
+    user_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 def init_db() -> None:
@@ -129,6 +167,7 @@ def _migrate() -> None:
         "status": "VARCHAR(20) DEFAULT 'todo'",
         "importance": "INTEGER DEFAULT 2",
         "url": "VARCHAR(1000)",
+        "updated_at": "DATETIME",
     }
     with engine.begin() as conn:
         existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(reminders)")}
@@ -140,6 +179,10 @@ def _migrate() -> None:
         # Первичное заполнение status из старого флага done: выполненные -> 'done'.
         if "status" in added:
             conn.exec_driver_sql("UPDATE reminders SET status='done' WHERE done=1")
+        # ALTER TABLE в SQLite не умеет вычисляемый DEFAULT, поэтому заполняем отдельно:
+        # для старых карточек «последнее изменение» = момент создания.
+        if "updated_at" in added:
+            conn.exec_driver_sql("UPDATE reminders SET updated_at = created_at")
     # Старые карточки писались без поля url, но текст сообщения сохранялся целиком —
     # вытаскиваем ссылки из raw_text, чтобы ничего не пропало.
     if "url" in added:
@@ -333,6 +376,110 @@ def set_remind_active(reminder_id: int, active: bool) -> None:
         if reminder:
             reminder.remind_active = active
             session.commit()
+
+
+def _naive_utc(moment: datetime) -> datetime:
+    """SQLite-колонки DateTime хранят время без смещения (у нас — всегда UTC).
+    Приводим входящий момент к тому же виду, иначе сравнение в WHERE соврёт."""
+    if moment.tzinfo is None:
+        return moment
+    return moment.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def list_changed_since(since: datetime) -> list[Reminder]:
+    """Карточки, изменённые после `since` — включая архивные и удалённые из доски.
+
+    Клиент (шорткат, приложение) присылает время своей последней синхронизации и
+    получает только разницу. Архив тоже отдаём: иначе клиент не узнает, что карточку
+    убрали с доски, и она осталась бы у него навсегда.
+    """
+    with Session(engine) as session:
+        stmt = (
+            select(Reminder)
+            .options(_eager())
+            .where(Reminder.updated_at > _naive_utc(since))
+            .order_by(Reminder.updated_at)
+        )
+        return list(session.scalars(stmt))
+
+
+# --- Доступ устройств: коды спаривания и токены -------------------------------
+
+
+def create_pairing_code(
+    user_id: int, code_hash: str, expires_at: datetime, user_name: str | None = None
+) -> None:
+    """Кладёт новый код, отменяя все прежние коды этого пользователя.
+
+    Один активный код на пользователя: так «/pair» дважды подряд не оставляет
+    позади живой код, о котором уже забыли."""
+    with Session(engine) as session:
+        session.execute(delete(PairingCode).where(PairingCode.user_id == user_id))
+        session.add(
+            PairingCode(
+                code_hash=code_hash,
+                user_id=user_id,
+                user_name=(user_name or None) and user_name[:100],
+                expires_at=_naive_utc(expires_at),
+            )
+        )
+        session.commit()
+
+
+def consume_pairing_code(code_hash: str) -> tuple[int, str | None] | None:
+    """Проверяет код и сразу его сжигает. Возвращает (user_id, имя) или None."""
+    with Session(engine) as session:
+        code = session.scalar(select(PairingCode).where(PairingCode.code_hash == code_hash))
+        if code is None:
+            return None
+        found = (code.user_id, code.user_name)
+        expired = code.expires_at < _naive_utc(utcnow())
+        # Код одноразовый в любом случае: и удачная попытка, и просроченная его убирают.
+        session.delete(code)
+        session.commit()
+        return None if expired else found
+
+
+def create_device_token(user_id: int, token_hash: str, name: str) -> DeviceToken:
+    with Session(engine) as session:
+        token = DeviceToken(token_hash=token_hash, user_id=user_id, name=name[:100])
+        session.add(token)
+        session.commit()
+        session.refresh(token)
+        return token
+
+
+def touch_device_token(token_hash: str) -> int | None:
+    """Возвращает user_id владельца токена (и отмечает момент использования)."""
+    with Session(engine) as session:
+        token = session.scalar(select(DeviceToken).where(DeviceToken.token_hash == token_hash))
+        if token is None:
+            return None
+        token.last_used_at = _naive_utc(utcnow())
+        user_id = token.user_id
+        session.commit()
+        return user_id
+
+
+def list_device_tokens(user_id: int) -> list[DeviceToken]:
+    with Session(engine) as session:
+        stmt = (
+            select(DeviceToken)
+            .where(DeviceToken.user_id == user_id)
+            .order_by(DeviceToken.created_at)
+        )
+        return list(session.scalars(stmt))
+
+
+def revoke_device_token(user_id: int, token_id: int) -> bool:
+    """Отзывает токен устройства. user_id — чтобы нельзя было отозвать чужой."""
+    with Session(engine) as session:
+        token = session.get(DeviceToken, token_id)
+        if token is None or token.user_id != user_id:
+            return False
+        session.delete(token)
+        session.commit()
+        return True
 
 
 def set_digest_milestone(reminder_id: int, milestone: int | None) -> None:

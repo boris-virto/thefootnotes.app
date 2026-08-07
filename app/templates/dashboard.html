@@ -44,11 +44,33 @@
       cursor: pointer; font-size: 0.8rem; padding: 2px 0; }
     .archive-btn:hover { color: var(--fg); }
     .hint { color: var(--muted); font-size: 0.8rem; margin-top: 16px; }
+
+    /* Переключатель колонки прямо на карточке. На телефоне это основной способ
+       двигать карточки: перетаскивание в HTML5 на тач-экранах не работает вовсе,
+       да и целиться в колонку, которая за краем экрана, невозможно. */
+    .moves { display: flex; gap: 6px; margin-top: 10px; }
+    .move { flex: 1; min-height: 34px; border: 1px solid transparent; border-radius: 8px;
+      background: var(--col); color: var(--muted); font: inherit; font-size: 0.78rem;
+      cursor: pointer; padding: 6px 4px; }
+    .move:hover { color: var(--fg); }
+    .move.on { background: transparent; border-color: var(--muted); color: var(--fg);
+      cursor: default; }
+
+    /* Узкий экран: колонки в столбик — горизонтальная прокрутка на телефоне
+       превращает доску в угадайку. */
+    @media (max-width: 720px) {
+      h1 { font-size: 1.3rem; }
+      .board { flex-direction: column; overflow-x: visible; }
+      /* flex: 1 1 0 из настольной раскладки делит здесь уже высоту, а не ширину —
+         колонки схлопнулись бы в ноль, и карточки полезли бы друг на друга. */
+      .col { flex: 0 0 auto; min-width: 0; min-height: 0; }
+      .move { min-height: 40px; font-size: 0.85rem; }  /* палец, а не курсор */
+    }
   </style>
 </head>
 <body>
   <h1>Мои задачи</h1>
-  <p class="sub">перетаскивай карточки между колонками · клик по кружку — важность
+  <p class="sub">кнопки на карточке — колонка · клик по кружку — важность
     {% if user_name %} · {{ user_name }}{% endif %}
     · <a href="/archive">архив</a>
     {% if user_name %} · <a href="/logout">выйти</a>{% endif %}</p>
@@ -90,6 +112,14 @@
             {% endif %}
           </div>
           {% endif %}
+          <div class="moves">
+            {% for skey, slabel in column_defs %}
+            <button class="move{% if skey == key %} on{% endif %}" draggable="false"
+              data-id="{{ r.id }}" data-status="{{ skey }}"
+              {% if skey == key %}disabled aria-current="true"{% endif %}
+              title="Перенести в «{{ slabel }}»">{{ status_short.get(skey, slabel) }}</button>
+            {% endfor %}
+          </div>
           {% if key == "done" %}
           <button class="archive-btn" data-id="{{ r.id }}">🗄 В архив</button>
           {% endif %}
@@ -145,6 +175,17 @@
         body.appendChild(card); // оптимистично двигаем, затем сохраняем и перерисовываем
         await patch(`/status/${id}`, { status });
         location.reload();
+      });
+    });
+
+    // --- Кнопки колонки на карточке (единственный рабочий способ на тач-экране) ---
+    document.querySelectorAll(".move").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (btn.disabled) return;
+        if (await patch(`/status/${btn.dataset.id}`, { status: btn.dataset.status })) {
+          location.reload();
+        }
       });
     });
 

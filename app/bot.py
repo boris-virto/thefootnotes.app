@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from collections.abc import Callable
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,24 +22,23 @@ from telegram.ext import (
     filters,
 )
 
-from . import db, links, llm, transcribe
+from . import db, ingest, tokens
 from .errors import report_error
 from .config import (
     DIGEST_CHAT_ID,
     DIGEST_TIME,
     FILES_DIR,
+    PUBLIC_URL,
     TELEGRAM_BOT_TOKEN,
     TIMEZONE,
     user_allowed,
 )
-from .llm import ExtractedReminder
+from .ingest import DEFAULT_REMIND_TIME, IngestFile
 
 logger = logging.getLogger(__name__)
 
 CATEGORY_EMOJI = {"task": "✅", "event": "📅", "ticket": "🎫", "note": "📝"}
 
-# Важность: строка от LLM -> число в БД, и отображение.
-IMPORTANCE_FROM_LLM = {"high": 3, "normal": 2, "low": 1}
 IMPORTANCE_EMOJI = {3: "🔴", 2: "🟡", 1: "🟢"}
 STATUS_NAME = {"todo": "TODO", "doing": "В процессе", "done": "Сделано", "archived": "Архив"}
 
@@ -52,8 +52,6 @@ STATUS_TRANSITIONS = {
 
 
 # --- Регулярные напоминания ---------------------------------------------------
-
-DEFAULT_REMIND_TIME = "09:00"
 
 # В этой версии PTB run_daily считает: 0=вс, 1=пн, ... 6=сб.
 _DAY_TO_PTB = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
@@ -308,73 +306,33 @@ def schedule_digest(job_queue: JobQueue) -> None:
     job_queue.run_daily(_send_morning_digest, time=_parse_time(DIGEST_TIME), name="digest")
 
 
-def _parse_date(value: str | None):
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError:
-        return None
+# --- Планировщик для слоя захвата ---------------------------------------------
 
 
-def _save(
-    extracted: ExtractedReminder,
-    *,
-    source: str,
-    raw_text: str | None,
-    chat_id: int,
-    file_path: str | None = None,
-    file_paths: list[str] | None = None,
-):
-    recurrence = extracted.recurrence
-    remind_time = extracted.remind_time or (DEFAULT_REMIND_TIME if recurrence else None)
-    importance = IMPORTANCE_FROM_LLM.get((extracted.importance or "normal").lower(), 2)
-    paths = list(file_paths) if file_paths else ([file_path] if file_path else [])
-    return db.add_reminder(
-        title=extracted.title,
-        category=extracted.category or "note",
-        event_date=_parse_date(extracted.event_date),
-        event_time=extracted.event_time,
-        location=extracted.location,
-        notes=extracted.notes,
-        # Ссылку берём из исходного текста регуляркой — дословно, без участия модели.
-        url=links.first_url(raw_text),
-        source=source,
-        raw_text=raw_text,
-        file_paths=paths,
-        chat_id=chat_id,
-        recurrence=recurrence,
-        remind_time=remind_time,
-        importance=importance,
+def build_scheduler(job_queue: JobQueue) -> Callable[[db.Reminder], None]:
+    """Возвращает функцию, которую слой захвата вызывает после сохранения карточки.
+
+    Через неё карточка, созданная из мобильного клиента, получает те же пинги, что и
+    присланная в чат: расписание живёт в JobQueue бота, и знать о нём должен только бот.
+    """
+
+    def schedule(reminder: db.Reminder) -> None:
+        if reminder.recurrence and reminder.remind_active:
+            schedule_reminder(job_queue, reminder)
+        if reminder.event_date:
+            schedule_event_reminder(job_queue, reminder)
+
+    return schedule
+
+
+async def _report_failure(
+    update: object, context: ContextTypes.DEFAULT_TYPE, failure: ingest.Failed
+) -> None:
+    """Сбой захвата -> обычный отчёт об ошибке (с трейсбеком исходного исключения)."""
+    await report_error(
+        update, context, failure.original,
+        where=failure.where, user_message=failure.user_message,
     )
-
-
-async def _save_and_schedule(
-    context: ContextTypes.DEFAULT_TYPE,
-    extracted: ExtractedReminder,
-    *,
-    chat_id: int,
-    source: str,
-    raw_text: str | None = None,
-    file_path: str | None = None,
-    file_paths: list[str] | None = None,
-) -> db.Reminder:
-    """Сохраняет напоминание и, если оно регулярное, ставит задачу в расписание.
-    chat_id передаём явно: для альбома сохранение идёт из job-колбэка, где Update нет."""
-    reminder = await asyncio.to_thread(
-        _save,
-        extracted,
-        source=source,
-        raw_text=raw_text,
-        file_path=file_path,
-        file_paths=file_paths,
-        chat_id=chat_id,
-    )
-    if reminder.recurrence and reminder.remind_active:
-        schedule_reminder(context.application.job_queue, reminder)
-    if reminder.event_date:
-        schedule_event_reminder(context.application.job_queue, reminder)
-    return reminder
 
 
 def _confirmation(reminder: db.Reminder) -> str:
@@ -428,7 +386,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команды:\n/list — доска задач с кнопками статуса\n"
         "/digest — утренний дайджест прямо сейчас\n"
         "/reminders — регулярные напоминания и выключатель\n"
-        "/files — скачать сохранённые билеты и файлы"
+        "/files — скачать сохранённые билеты и файлы\n"
+        "/pair — код для входа с телефона"
     )
 
 
@@ -518,62 +477,27 @@ async def digest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
-    text = update.message.text
     await update.message.chat.send_action("typing")
-
-    urls = links.find_urls(text)
-    pdf_urls = [u for u in urls if links.is_pdf_url(u)]
-
-    # Ссылка на PDF -> Claude читает файл по ссылке.
-    if pdf_urls:
-        url = pdf_urls[0]
-        try:
-            extracted = await asyncio.to_thread(llm.structure_pdf_url, url)
-            reminder = await _save_and_schedule(
-                context, extracted, chat_id=update.effective_chat.id,
-                source="pdf", raw_text=url,
-            )
-        except Exception as e:
-            await report_error(
-                update, context, e, where="pdf-url",
-                user_message="Не смог открыть PDF по ссылке — возможно, он за логином или "
-                "недоступен. Попробуй прикрепить файл через 📎.",
-            )
-            return
-        await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
-        return
-
-    # Сообщение — это просто ссылка, но не на PDF: не сохраняем мусор.
-    if len(urls) == 1 and text.strip() == urls[0]:
-        await update.message.reply_text(
-            "Это ссылка не на PDF. Пришли PDF файлом через 📎 или дай прямую ссылку "
-            "на .pdf. Обычные веб-страницы я пока читать не умею."
-        )
-        return
-
-    # Обычный текст (в т.ч. заметка со ссылкой внутри).
     try:
-        extracted = await asyncio.to_thread(llm.structure_text, text)
-        reminder = await _save_and_schedule(
-            context, extracted, chat_id=update.effective_chat.id, source="text", raw_text=text,
+        result = await ingest.ingest_text(
+            update.message.text, chat_id=update.effective_chat.id
         )
-    except Exception as e:
-        await report_error(
-            update, context, e, where="text",
-            user_message="Не смог разобрать сообщение в напоминание. Попробуй ещё раз.",
-        )
+    except ingest.Rejected as e:
+        await update.message.reply_text(str(e))
         return
-    await update.message.reply_text(_confirmation(reminder), parse_mode="HTML")
+    except ingest.Failed as e:
+        await _report_failure(update, context, e)
+        return
+    await update.message.reply_text(_confirmation(result.reminder), parse_mode="HTML")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _guard(update):
         return
     await update.message.chat.send_action("typing")
-    voice = update.message.voice
 
     try:
-        tg_file = await context.bot.get_file(voice.file_id)
+        tg_file = await context.bot.get_file(update.message.voice.file_id)
         audio = bytes(await tg_file.download_as_bytearray())
     except Exception as e:
         await report_error(
@@ -582,40 +506,30 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Сначала облачный Whisper; если он сбоит — переходим на локальную модель
-    # (медленнее), обязательно предупредив пользователя о задержке.
-    try:
-        text = await asyncio.to_thread(transcribe.transcribe_remote, audio)
-    except Exception as e:
-        logger.warning("OpenAI Whisper недоступен, фолбэк на локальную модель: %s", e)
+    async def warn_about_local_fallback() -> None:
+        # Локальная модель заметно медленнее — предупреждаем, чтобы не ждали молча.
         await update.message.reply_text(
             "⏳ Облачное распознавание сейчас недоступно — распознаю локально. "
             "Это займёт немного дольше, подожди…"
         )
         await update.message.chat.send_action("typing")
-        try:
-            text = await asyncio.to_thread(transcribe.transcribe_local, audio)
-        except Exception as e2:
-            await report_error(
-                update, context, e2, where="voice-transcribe-local",
-                user_message="🎙 Не смог распознать голосовое ни в облаке, ни локально. "
-                "Попробуй ещё раз или пришли текстом.",
-            )
-            return
+
     try:
-        extracted = await asyncio.to_thread(llm.structure_text, text)
-        reminder = await _save_and_schedule(
-            context, extracted, chat_id=update.effective_chat.id, source="voice", raw_text=text,
+        result = await ingest.ingest_audio(
+            audio,
+            chat_id=update.effective_chat.id,
+            on_local_fallback=warn_about_local_fallback,
         )
-    except Exception as e:
-        await report_error(
-            update, context, e, where="voice-structure",
-            user_message=f"🎙 Расшифровал: «{text}»\n\n"
-            "…но не смог разобрать в напоминание. Попробуй ещё раз.",
-        )
+    except ingest.Rejected as e:
+        await update.message.reply_text(str(e))
+        return
+    except ingest.Failed as e:
+        await _report_failure(update, context, e)
         return
     await update.message.reply_text(
-        f"🎙 Расшифровал: <i>{text}</i>\n\n{_confirmation(reminder)}", parse_mode="HTML"
+        f"🎙 Расшифровал: <i>{html.escape(result.transcript or '')}</i>\n\n"
+        f"{_confirmation(result.reminder)}",
+        parse_mode="HTML",
     )
 
 
@@ -675,15 +589,21 @@ async def _handle_incoming_file(
 
     await message.chat.send_action("typing")
     try:
-        extracted = await asyncio.to_thread(llm.structure_files, [(data, media_type)])
-        reminder = await _save_and_schedule(
-            context, extracted, chat_id=update.effective_chat.id,
-            source=source, raw_text=message.caption, file_paths=[str(path)],
+        result = await ingest.ingest_files(
+            [IngestFile(data, media_type, str(path))],
+            source=source,
+            caption=message.caption,
+            chat_id=update.effective_chat.id,
+            where=where,
+            user_message=user_message,
         )
-    except Exception as e:
-        await report_error(update, context, e, where=where, user_message=user_message)
+    except ingest.Rejected as e:
+        await message.reply_text(str(e))
         return
-    await message.reply_text(_confirmation(reminder), parse_mode="HTML")
+    except ingest.Failed as e:
+        await _report_failure(update, context, e)
+        return
+    await message.reply_text(_confirmation(result.reminder), parse_mode="HTML")
 
 
 async def _process_media_group(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -701,22 +621,23 @@ async def _process_media_group(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     try:
         await message.chat.send_action("typing")
-        extracted = await asyncio.to_thread(
-            llm.structure_files, [(data, mt) for data, mt, _ in files]
-        )
-        reminder = await _save_and_schedule(
-            context, extracted, chat_id=group["chat_id"], source=group["source"],
-            raw_text=caption, file_paths=[p for _, _, p in files],
-        )
-    except Exception as e:
-        await report_error(
-            fake_update, context, e, where="media-group",
+        result = await ingest.ingest_files(
+            [IngestFile(data, mt, path) for data, mt, path in files],
+            source=group["source"],
+            caption=caption,
+            chat_id=group["chat_id"],
+            where="media-group",
             user_message=f"📎 Получил {len(files)} файла, но не смог разобрать их в "
             "напоминание. Попробуй прислать по одному.",
         )
+    except ingest.Rejected as e:
+        await message.reply_text(str(e))
+        return
+    except ingest.Failed as e:
+        await _report_failure(fake_update, context, e)
         return
     note = f"📎 Файлов: {len(files)} — сохранил одной карточкой.\n\n"
-    await message.reply_text(note + _confirmation(reminder), parse_mode="HTML")
+    await message.reply_text(note + _confirmation(result.reminder), parse_mode="HTML")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -841,12 +762,34 @@ async def on_send_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def pair_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выдаёт одноразовый код для привязки устройства: приложения на iPhone, шортката
+    iOS или дашборда в браузере. Пароля у дашборда нет, а нативному клиенту вход
+    через Login Widget недоступен — код закрывает и то, и другое."""
+    if not await _guard(update):
+        return
+    user = update.effective_user
+    code = await asyncio.to_thread(
+        tokens.issue_code, user.id, user.first_name or user.username
+    )
+    minutes = int(tokens.CODE_TTL.total_seconds() // 60)
+    where = f"{PUBLIC_URL}/login" if PUBLIC_URL else "страницу входа дашборда"
+    await update.message.reply_text(
+        f"🔑 Код для привязки устройства:\n\n<code>{tokens.format_code(code)}</code>\n\n"
+        f"Действует {minutes} минут и работает один раз.\n\n"
+        f"Приложение спросит его при первом запуске. Для входа в браузере — "
+        f"открой {where} и введи код там.",
+        parse_mode="HTML",
+    )
+
+
 # Список команд для автодополнения по «/» и кнопки «Меню» в клиенте Telegram.
 BOT_COMMANDS = [
     BotCommand("list", "📋 Доска задач"),
     BotCommand("digest", "☀️ Дайджест сейчас"),
     BotCommand("reminders", "🔔 Регулярные напоминания"),
     BotCommand("files", "📎 Сохранённые файлы"),
+    BotCommand("pair", "🔑 Код для входа с телефона"),
     BotCommand("start", "ℹ️ Помощь"),
 ]
 
@@ -869,6 +812,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("digest", digest_cmd))
     app.add_handler(CommandHandler("reminders", reminders_cmd))
     app.add_handler(CommandHandler("files", files_cmd))
+    app.add_handler(CommandHandler("pair", pair_cmd))
     app.add_handler(CallbackQueryHandler(on_stop_reminder, pattern=r"^stop:"))
     app.add_handler(CallbackQueryHandler(on_send_file, pattern=r"^file:"))
     app.add_handler(CallbackQueryHandler(on_set_status, pattern=r"^st:"))
