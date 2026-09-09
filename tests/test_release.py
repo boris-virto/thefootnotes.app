@@ -53,6 +53,15 @@ def test_failed_readiness_rolls_back_code_without_restoring_database(deployment,
     assert not (root / 'deployed-sequence').exists()
 
 
+def test_public_readiness_failure_also_rolls_back(deployment, monkeypatch):
+    root, old, commands = deployment
+    monkeypatch.setattr(release, 'ready', lambda sha, url='', **k: not url)
+    with pytest.raises(RuntimeError, match='Public'):
+        release.deploy(root, root / 'archive', SHA, 10, 'https://example.invalid/health/ready')
+    assert (root / 'current').resolve() == old
+    assert not any('restore' in c for c in commands)
+
+
 def test_failed_migration_restores_backup_before_old_process_starts(deployment, monkeypatch):
     root, old, commands = deployment
     original = release.run

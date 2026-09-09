@@ -84,7 +84,9 @@ def deploy(root: Path, archive: Path, sha: str, sequence: int, public_url=''):
     run(python, '-m', 'pip', 'check')
     environment = dict(os.environ, PYTHONPATH=str(release), PYTHONSAFEPATH='1',
                        DOTENV_PATH=str(root / '.env'))
-    run(python, '-c', 'import app.main; import faster_whisper', cwd=root, env=environment)
+    run(python, '-c', 'import os, app.main, faster_whisper; from pathlib import Path; '
+        'assert Path(app.main.__file__).resolve().is_relative_to(Path(os.environ["PYTHONPATH"]))',
+        cwd=root, env=environment)
     backup = root / 'backups' / f'{sha}-{time.time_ns()}'
     stopped = False
     started_candidate = False

@@ -30,8 +30,14 @@ if systemctl restart thefootnotes && python3 "$source_dir/check_legacy.py"; then
     echo 'Bootstrap complete. Existing application is running via current; CI can now deploy.'
 else
     cp -a "$root/backups/service-before-releases" /etc/systemd/system/thefootnotes.service
+    if [[ -f "$root/backups/sudoers-before-releases" ]]; then
+        cp -a "$root/backups/sudoers-before-releases" /etc/sudoers.d/thefootnotes
+    else
+        rm -f /etc/sudoers.d/thefootnotes
+    fi
     systemctl daemon-reload
     systemctl restart thefootnotes
+    rm "$root/current"
     echo 'Bootstrap failed; old systemd unit restored. Inspect logs before retrying.' >&2
     exit 1
 fi
