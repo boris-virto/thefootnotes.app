@@ -5,9 +5,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(os.getenv("DOTENV_PATH"))
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_ENABLED = os.getenv("BOT_ENABLED", "true").lower() == "true"
+# Production migrates explicitly during deployment while the old process is stopped.
+MIGRATE_ON_START = os.getenv("MIGRATE_ON_START", "true").lower() == "true"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 

@@ -18,6 +18,7 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+from sqlalchemy import text
 
 from . import db, ingest, tokens
 from .api import COLUMNS, router as api_router
@@ -32,7 +33,9 @@ from .bot import (
     setup_commands,
 )
 from .config import (
+    BOT_ENABLED,
     DIGEST_TIME,
+    MIGRATE_ON_START,
     SESSION_SECRET,
     TELEGRAM_BOT_TOKEN,
     user_allowed,
@@ -50,10 +53,12 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init_db()
+    app.state.ready = False
+    if MIGRATE_ON_START:
+        db.init_db()
 
     tg_app = None
-    if TELEGRAM_BOT_TOKEN:
+    if BOT_ENABLED and TELEGRAM_BOT_TOKEN:
         tg_app = build_application()
         await tg_app.initialize()
         await tg_app.start()
@@ -93,9 +98,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("TELEGRAM_BOT_TOKEN не задан — бот не запущен, работает только дашборд.")
 
+    app.state.tg_app = tg_app
+    app.state.ready = True
     try:
         yield
     finally:
+        app.state.ready = False
         ingest.set_scheduler(None)
         if tg_app:
             await tg_app.updater.stop()
@@ -105,6 +113,31 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.state.ready = False
+app.state.tg_app = None
+_release_file = Path(__file__).resolve().parent.parent / "RELEASE"
+RELEASE = _release_file.read_text().strip() if _release_file.exists() else "development"
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "ok", "release": RELEASE}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready(request: Request):
+    tg = request.app.state.tg_app
+    if not request.app.state.ready or (
+        BOT_ENABLED and (not tg or not tg.running or not tg.updater.running)
+    ):
+        raise HTTPException(status_code=503, detail="Service is starting or stopping")
+    try:
+        with db.engine.connect() as conn:
+            # Also check that the migrated schema is present; no paid API calls.
+            conn.execute(text("SELECT id, updated_at FROM reminders LIMIT 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database is unavailable") from None
+    return {"status": "ok", "release": RELEASE}
 # Имя бота узнаём при старте (нужно кнопке Telegram Login Widget). Значение по умолчанию
 # ставим здесь, чтобы страница входа открывалась даже когда бот не поднялся: вход по коду
 # от Login Widget не зависит и должен работать всегда.

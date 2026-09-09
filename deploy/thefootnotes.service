@@ -9,7 +9,10 @@ User=thefootnotes
 Group=thefootnotes
 WorkingDirectory=/opt/thefootnotes
 # .env читается самим приложением (load_dotenv) из WorkingDirectory.
-ExecStart=/opt/thefootnotes/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Environment=MIGRATE_ON_START=false
+# Keep WorkingDirectory stable: existing relative DB/attachment paths and .env survive.
+ExecStart=/opt/thefootnotes/current/.venv/bin/python -m uvicorn app.main:app --app-dir /opt/thefootnotes/current --host 127.0.0.1 --port 8000
+TimeoutStopSec=90
 Restart=always
 RestartSec=3
 

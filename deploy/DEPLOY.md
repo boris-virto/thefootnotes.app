@@ -1,320 +1,139 @@
-# Деплой на VPS (Debian 13, Vultr) + авто-деплой через GitHub Actions
+# GitHub Actions → VPS → systemd
 
-Итог:
-- бот и дашборд — systemd-сервис под непривилегированным пользователем `thefootnotes` (с харденингом);
-- nginx отдаёт дашборд по HTTPS с паролем на `https://thefootnotes.app`;
-- данные (SQLite + файлы) лежат на диске в `/opt/thefootnotes/data` и не теряются;
-- каждый `git push` в `main` автоматически выкатывается на сервер.
+Целевой сервер: Debian 13, x86_64, Python 3.13, nginx; пользователь `thefootnotes`.
+Бот и HTTP работают в одном процессе. Docker на VPS не нужен.
 
-Значения-примеры: домен `thefootnotes.app`, путь `/opt/thefootnotes`, пользователь `thefootnotes`,
-репозиторий `github.com/USER/thefootnotes` (подставь свой).
+## Как проходит выпуск
 
----
+`.github/workflows/deploy.yml` запускается на PR, push main и вручную на main.
 
-## Шаг 0. DNS
+1. Устанавливает `requirements-dev.lock` с проверкой хэшей; запускает тесты, pip check,
+   compileall и настоящий Uvicorn без Telegram/LLM.
+2. Собирает артефакт конкретного commit: код, production lock и Linux wheels.
+   Проверяет отдельный production venv без dev-пакетов. Даже PR проверяет эту сборку.
+3. Только для main, после CI, скачивает этот артефакт в job `Deploy production`.
+4. Передаёт его через SSH с проверкой закреплённого host key. Сервер проверяет checksum,
+   SHA, Python/architecture и устанавливает wheels без доступа к PyPI в отдельный venv.
+5. Останавливает единственный процесс, создаёт backup SQLite и вложений, проверяет миграцию
+   на копии БД, мигрирует рабочую БД, атомарно переключает `current`, запускает systemd.
+6. Проверяет `/health/ready` локально и через публичный домен, включая SHA релиза.
+   При сбое возвращает старый код. Job остаётся красным даже после успешного отката.
 
-В DNS-настройках домена `thefootnotes.app` добавь запись на корень домена:
+GitHub concurrency и серверный flock исключают одновременные переключения. Номер workflow
+не позволяет старому запуску заменить более новый успешный релиз. Запущенный deploy не отменяем.
+
+## Постоянные пути
 
 ```
-Тип: A    Имя: @    Значение: <публичный IP сервера>
+/opt/thefootnotes/
+  .env                    # существующие ключи, никогда не входят в CI artifact
+  data/                   # существующая SQLite, files/, whisper-models/
+  current -> releases/...
+  previous -> releases/...
+  releases/<sha>-<run>-<id>/  # код, RELEASE, .venv, wheels
+  incoming/<run>-<attempt>/  # доставленный архив и checksum
+  backups/<sha>-<id>/        # database.sqlite, files/, manifest.json
 ```
 
-IP сервера можно узнать на самом сервере: `curl -4 ifconfig.me`. Проверить, что применилось:
-`ping thefootnotes.app` (должен резолвиться в IP сервера; может занять несколько минут).
+WorkingDirectory остаётся `/opt/thefootnotes`, поэтому старые относительные пути вложений
+`data/files/...` продолжают работать. `--app-dir current` выбирает код релиза. DB/FILES_DIR
+не переносим. Процедура проверяет существование SQLite внутри DATA_DIR и отказывается
+незаметно создавать пустую БД при неверных настройках. Пользовательские внешние пути и
+PostgreSQL требуют отдельной адаптации runbook.
 
-> `.app` — TLD из списка HSTS preload: браузеры работают с ним только по HTTPS. У нас HTTPS
-> настраивается через certbot (шаг 10), так что всё в порядке — просто plain-HTTP доступа не будет.
+## Разовая настройка существующего VPS
 
-> **Домен на Cloudflare?** Если A-запись стоит под проксёй (оранжевое облако), `ping thefootnotes.app`
-> покажет **IP Cloudflare**, а не твоего сервера — это нормально, а не ошибка. При этом меняются шаги
-> **8 (nginx)** и **10 (сертификат)**, а для авто-деплоя в `SSH_HOST` пойдёт сырой IP. Полностью
-> см. приложение [**«Cloudflare (оранжевое облако)»**](#cloudflare-оранжевое-облако) внизу — оно
-> заменяет шаги 8 и 10 и меняет секрет `SSH_HOST`.
+Сначала запустить CI на PR и проверить diff. Не сливать новую конфигурацию в main, пока
+сервер не подготовлен: merge запускает deploy.
 
----
+1. Убедиться, что `python3` — 3.13, архитектура x86_64, установлены python3-venv, sudo,
+   nginx и достаточно места для старого/нового venv, wheelhouse и копии данных.
+2. Передать проверенную папку `deploy/` отдельно, например `/tmp/footnotes-bootstrap/`.
+   Не делать `git pull` в рабочем production-каталоге.
+3. Под root выполнить:
 
-## Часть 1. Разовая настройка сервера (под root)
+   ```bash
+   bash /tmp/footnotes-bootstrap/bootstrap.sh
+   ```
 
-### 1. Пакеты
+   Скрипт сохраняет текущий код как `legacy-*`, ссылается на старый venv, сохраняет старый
+   unit, устанавливает новый и перезапускает существующую версию. Данные не переносит.
+   При неудачном старте возвращает старый unit. Повторное выполнение с current запрещено.
+   При первом откате на legacy проверяется `/login`; следующие релизы проверяют readiness + SHA.
+4. Проверить `systemctl status thefootnotes`, `/login`, существующие карточки и бота.
+5. Deploy-пользователю разрешены только `systemctl start/stop/restart thefootnotes` через sudo.
+   Deploy имеет доступ к своему коду и данным; root shell GitHub не получает.
+
+## GitHub
+
+Существующие secrets сохраняются: `SSH_HOST` (IP VPS, не адрес Cloudflare proxy),
+`SSH_USER`, `SSH_KEY`. Добавляется **SSH_KNOWN_HOSTS** — проверенная строка ключа сервера
+в формате known_hosts для SSH_HOST. Сверить fingerprint через доверенное подключение
+или консоль VPS. Не использовать слепой ssh-keyscan непосредственно в workflow.
+
+Environment: `production`, разрешённая deployment branch — main. PR jobs не используют
+production secrets. Для main включить required check **Tests and startup**, запрет force
+push и удаление ветки. Ручное одобрение каждого выпуска необязательно.
+
+Actions закреплены по полным SHA; обновлять их отдельными PR. CI использует GitHub-hosted
+Ubuntu 24.04, Python 3.13; wheels должны быть совместимы с Debian 13 x86_64.
+
+## Откат и миграции
+
+`app/db.py:init_db()` пока остаётся мигратором. В production `MIGRATE_ON_START=false`,
+миграции выполняются явно в окне остановки. Они должны оставаться обратно совместимыми
+с предыдущим релизом: добавление колонок/таблиц, затем отдельным будущим выпуском удаление
+старых структур. Проверка миграции на копии не доказывает совместимость произвольного старого кода.
+
+Если миграция падает **до запуска нового процесса**, deploy восстанавливает pre-deploy БД
+и запускает старый код. Если новый процесс уже запускался, откат меняет **только код**:
+автоматический возврат старой БД мог бы потерять новые записи. При несовместимой схеме
+понадобится ручное восстановление; workflow покажет ошибку readiness старого релиза.
+
+Для обычного ручного отката предпочтительно revert проблемного commit через PR: новый CI
+соберёт и проверит нужную версию. Emergency-переключение previous допустимо только после
+проверки совместимости схемы и под тем же `.deploy.lock`.
+
+## Backup и место на диске
+
+Каждый deploy сохраняет согласованную SQLite-копию через Backup API и вложения при
+остановленном writer. `whisper-models` — восстанавливаемый cache, в backup не включён.
+Секреты .env должны иметь отдельную защищённую копию; в архив приложения они не попадают.
+
+Локальный backup не защищает от потери VPS. Нужен отдельный offsite storage и регулярное
+расписание; destination/credentials не задаются этим workflow. Проверка восстановления:
+развернуть database.sqlite и files/ в отдельной временной среде с BOT_ENABLED=false,
+проверить integrity_check, миграции, чтение карточек и вложений.
+
+Релизы и backups автоматически не удаляются: до выбора retention проверять свободное место
+и удалять вручную только ненужные архивы, не current/previous. При нехватке места на подготовке
+работающий сервис остаётся нетронутым; ошибка backup запускает старый процесс.
+
+## Зависимости
+
+Файлы requirements*.txt — входные требования; requirements*.lock — конкретные версии и хэши.
+Первый lock сохраняет версии из проверенного окружения; Linux-зависимости разрешены отдельно.
+Обновление выполнять отдельным PR (uv 0.9.2):
 
 ```bash
-apt update
-apt install -y git python3 python3-venv python3-pip nginx certbot python3-certbot-nginx apache2-utils
+uv pip compile requirements-dev.txt --python-version 3.13 --python-platform x86_64-manylinux_2_39 --generate-hashes -o requirements-dev.lock
+uv pip compile requirements.txt -c requirements-dev.lock --python-version 3.13 --python-platform x86_64-manylinux_2_39 --generate-hashes -o requirements.lock
 ```
 
-### 2. Пользователь `thefootnotes`
-
-Отдельный непривилегированный пользователь: под ним и работает сервис, и заходит деплой.
-
-```bash
-useradd -m -d /home/thefootnotes -s /bin/bash thefootnotes
-```
-
-### 3. Клонируем репозиторий в /opt/thefootnotes
-
-```bash
-mkdir -p /opt/thefootnotes
-chown thefootnotes:thefootnotes /opt/thefootnotes
-# Публичный репозиторий — по https, без ключей:
-sudo -u thefootnotes git clone https://github.com/USER/thefootnotes.git /opt/thefootnotes
-# (Если репозиторий приватный — см. раздел «Приватный репозиторий» внизу.)
-
-# Папка данных должна существовать до первого старта (из-за строгого харденинга):
-sudo -u thefootnotes mkdir -p /opt/thefootnotes/data/files
-```
-
-### 4. Виртуальное окружение и зависимости
-
-```bash
-sudo -u thefootnotes python3 -m venv /opt/thefootnotes/.venv
-sudo -u thefootnotes /opt/thefootnotes/.venv/bin/pip install --upgrade pip
-sudo -u thefootnotes /opt/thefootnotes/.venv/bin/pip install -r /opt/thefootnotes/requirements.txt
-```
-
-### 5. Файл .env с ключами
-
-```bash
-sudo -u thefootnotes nano /opt/thefootnotes/.env
-```
-
-Вставь (значения возьми из локального `.env`):
-
-```
-TELEGRAM_BOT_TOKEN=...
-ANTHROPIC_API_KEY=...
-OPENAI_API_KEY=...
-ALLOWED_USER_IDS=130359870
-ANTHROPIC_MODEL=claude-haiku-4-5
-TIMEZONE=Europe/Belgrade
-DATA_DIR=data
-PUBLIC_URL=https://thefootnotes.app
-```
-
-`PUBLIC_URL` нужен только для удобства: бот подставляет его в ссылку на вход с телефона
-(команда `/pair`). Без него команда всё равно работает, просто без готовой ссылки.
-
-Закрыть доступ:
-
-```bash
-chmod 600 /opt/thefootnotes/.env
-```
-
-### 6. Право рестартовать сервис без пароля (узкий sudo)
-
-Чтобы деплой мог перезапускать сервис, но не более того:
-
-```bash
-echo 'thefootnotes ALL=(root) NOPASSWD: /usr/bin/systemctl restart thefootnotes' \
-  > /etc/sudoers.d/thefootnotes
-chmod 440 /etc/sudoers.d/thefootnotes
-```
-
-### 7. systemd-сервис
-
-```bash
-cp /opt/thefootnotes/deploy/thefootnotes.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now thefootnotes
-systemctl status thefootnotes --no-pager
-journalctl -u thefootnotes -n 30 --no-pager   # должно быть «Телеграм-бот запущен»
-```
-
-С этого момента **бот уже работает** — можно писать ему в Telegram.
-
-### 8. nginx
-
-```bash
-cp /opt/thefootnotes/deploy/nginx-thefootnotes.conf /etc/nginx/sites-available/thefootnotes
-ln -sf /etc/nginx/sites-available/thefootnotes /etc/nginx/sites-enabled/thefootnotes
-```
-
-> Дефолтный сайт nginx (`/etc/nginx/sites-enabled/default`) НЕ удаляем — если на сервере
-> есть другие домены, он их не сломает. Наш конфиг ловит только `thefootnotes.app`.
-
-### 9. Доступ к дашборду — вход по Telegram
-
-Пароль в nginx (basic-auth) больше **не нужен** — авторизацию делает само приложение
-через Telegram Login Widget, сверяя твой user id с `ALLOWED_USER_IDS`. Конфиги nginx
-(`nginx-thefootnotes*.conf`) уже без `auth_basic`.
-
-Единственное, что нужно сделать один раз — **привязать домен к боту**, иначе кнопка входа
-не появится:
-
-1. Напиши [@BotFather](https://t.me/BotFather) → `/setdomain`.
-2. Выбери своего бота.
-3. Отправь домен: `thefootnotes.app`.
-
-> Если раньше создавал файл `/etc/nginx/.htpasswd-thefootnotes` — его можно удалить.
-
-### 10. HTTPS-сертификат
-
-```bash
-nginx -t && systemctl reload nginx
-certbot --nginx -d thefootnotes.app    # спросит email и согласие; сам настроит 443 и редирект
-```
-
-> **Cloudflare с проксёй?** Пропусти шаги 8 и 10 — они не сработают (certbot по HTTP-01 достучится
-> до Cloudflare, а не до nginx). Вместо них выполни приложение [«Cloudflare (оранжевое облако)»](#cloudflare-оранжевое-облако).
-
-### 11. Файрвол, если включён ufw
-
-```bash
-ufw status                       # если "inactive" — пропусти
-ufw allow 22 && ufw allow 80 && ufw allow 443
-```
-
-Проверка: открой **https://thefootnotes.app** → логин/пароль из шага 9 → дашборд.
-
----
-
-## Часть 2. Авто-деплой через GitHub Actions
-
-Workflow уже лежит в `.github/workflows/deploy.yml`. Он при каждом пуше в `main` заходит
-на сервер по SSH и делает `git pull` + `pip install` + рестарт сервиса.
-
-### 1. Ключ для деплоя (SSH)
-
-**На своём компе** создай отдельную пару ключей для CI:
-
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/thefootnotes_deploy -N "" -C "github-actions-thefootnotes"
-```
-
-**Публичную** часть добавь пользователю `thefootnotes` на сервере:
-
-```bash
-# скопируй содержимое ~/.ssh/thefootnotes_deploy.pub, затем на сервере:
-sudo -u thefootnotes mkdir -p /home/thefootnotes/.ssh
-sudo -u thefootnotes tee -a /home/thefootnotes/.ssh/authorized_keys   # вставь строку, Ctrl+D
-chmod 700 /home/thefootnotes/.ssh && chmod 600 /home/thefootnotes/.ssh/authorized_keys
-chown -R thefootnotes:thefootnotes /home/thefootnotes/.ssh
-```
-
-### 2. Секреты в GitHub
-
-В репозитории → Settings → Secrets and variables → Actions → New repository secret:
-
-| Имя | Значение |
-|-----|----------|
-| `SSH_HOST` | `thefootnotes.app` (**Cloudflare с проксёй → сырой IP сервера**, см. ниже) |
-| `SSH_USER` | `thefootnotes` |
-| `SSH_KEY`  | содержимое **приватного** файла `~/.ssh/thefootnotes_deploy` (целиком) |
-
-> **Cloudflare с проксёй?** Порт 22 (SSH) Cloudflare не проксирует — подключение к `thefootnotes.app:22`
-> уйдёт на edge Cloudflare и повиснет. Поэтому в `SSH_HOST` укажи **публичный IP сервера** (деплою домен
-> не нужен, ему надо просто достучаться до машины). Веб при этом остаётся под проксёй.
-
-### 3. Готово
-
-Теперь любой `git push` в `main` автоматически выкатывается. Прогресс — во вкладке **Actions**
-репозитория. Запустить вручную можно там же (Run workflow).
-
----
-
-## Обновление кода
-
-Просто:
-
-```bash
-git add -A && git commit -m "..." && git push
-```
-
-GitHub Actions сам зальёт на сервер и перезапустит сервис. `data/` и `.env` не трогаются.
-
----
-
-## Переезд на PostgreSQL (когда понадобится)
-
-Код уже готов: адрес базы берётся из `DATABASE_URL` (по умолчанию SQLite). Чтобы переехать:
-
-1. Поставить Postgres на сервере, создать базу и пользователя.
-2. Добавить драйвер: `pip install "psycopg[binary]"` (и в `requirements.txt`).
-3. В `.env` прописать `DATABASE_URL=postgresql+psycopg://thefootnotes:пароль@localhost:5432/thefootnotes`.
-4. Для миграций схемы подключить Alembic (сейчас авто-миграция колонок работает только для SQLite).
-
-Старые данные из SQLite при желании перельём отдельным скриптом.
-
----
-
-## Приватный репозиторий (если не хочешь делать публичным)
-
-Для `git pull` на сервере нужен read-only доступ к репозиторию:
-
-1. На сервере: `sudo -u thefootnotes ssh-keygen -t ed25519 -f /home/thefootnotes/.ssh/github -N ""`
-2. Содержимое `/home/thefootnotes/.ssh/github.pub` добавь в GitHub → репозиторий → Settings →
-   Deploy keys (read-only).
-3. Настрой git на использование этого ключа и клонируй по SSH:
-   `git@github.com:USER/thefootnotes.git`.
-
----
-
-## Cloudflare (оранжевое облако)
-
-Это приложение — для случая, когда домен управляется Cloudflare и A-запись `@` стоит **под проксёй
-(оранжевое облако)**. Оно **заменяет шаги 8 и 10** основной инструкции и меняет секрет `SSH_HOST`.
-Всё остальное (юзер, клон, venv, `.env`, sudo, systemd, htpasswd, ufw) делается как в основной части.
-
-Как это устроено: HTTPS для браузера обеспечивает сам Cloudflare (у edge есть сертификат на домен —
-и требование `.app` про обязательный HTTPS закрывается автоматически). Между Cloudflare и нашим
-сервером шифрование настраиваем через **Cloudflare Origin Certificate**. certbot не нужен.
-
-### CF-1. Режим SSL/TLS
-
-Cloudflare → **SSL/TLS → Overview** → выбери **Full (strict)**.
-
-> Не оставляй «Flexible»: origin будет редиректить на HTTPS, а Cloudflare ходить по HTTP — получится
-> бесконечный редирект.
-
-### CF-2. Origin-сертификат
-
-Cloudflare → **SSL/TLS → Origin Server → Create Certificate** → оставь настройки по умолчанию
-(RSA, срок 15 лет, hostnames `thefootnotes.app` и `*.thefootnotes.app`) → **Create**.
-
-Cloudflare покажет два блока — **Origin Certificate** и **Private Key**. Сохрани их на сервере:
-
-```bash
-mkdir -p /etc/ssl/cloudflare
-nano /etc/ssl/cloudflare/thefootnotes.pem   # вставь блок Origin Certificate
-nano /etc/ssl/cloudflare/thefootnotes.key   # вставь блок Private Key
-chmod 600 /etc/ssl/cloudflare/thefootnotes.key
-```
-
-### CF-3. nginx (замена шага 8)
-
-Используем готовый конфиг с блоком 443 и путями к origin-сертификату:
-
-```bash
-cp /opt/thefootnotes/deploy/nginx-thefootnotes-cloudflare.conf /etc/nginx/sites-available/thefootnotes
-ln -sf /etc/nginx/sites-available/thefootnotes /etc/nginx/sites-enabled/thefootnotes
-nginx -t && systemctl reload nginx
-```
-
-Шаг 10 (certbot) **пропускаем полностью** — сертификат уже на месте.
-
-### CF-4. Файрвол (опционально, но желательно)
-
-Раз весь веб-трафик идёт через Cloudflare, порты 80/443 можно открыть только для диапазонов
-Cloudflare, чтобы origin не дёргали напрямую. Актуальные диапазоны: <https://www.cloudflare.com/ips/>.
-Порт 22 при этом оставь открытым (нужен для деплоя). Если возиться не хочется — обычный
-`ufw allow 80,443` из шага 11 тоже работает.
-
-### CF-5. Секрет `SSH_HOST` = IP
-
-В GitHub-секретах (Часть 2, шаг 2) в `SSH_HOST` поставь **публичный IP сервера**, а не `thefootnotes.app`
-— Cloudflare не проксирует порт 22. Проверь со своего компа:
-
-```bash
-ssh -i ~/.ssh/thefootnotes_deploy thefootnotes@<IP-сервера> "echo ok"
-```
-
-**Проверка:** открой **https://thefootnotes.app** → логин/пароль из шага 9 → дашборд.
-В Cloudflare → SSL/TLS → Overview статус должен быть без ошибок сертификата origin.
-
----
-
-## Полезное
-
-- Логи в реальном времени: `journalctl -u thefootnotes -f`
-- Ручной перезапуск: `systemctl restart thefootnotes`
-- Бэкап: скопировать `/opt/thefootnotes/data/`
-- Сертификат продлевается сам; проверить таймер: `systemctl list-timers | grep certbot`
+CI и production требуют wheel для каждой зависимости. Отсутствующий Linux wheel блокирует
+выпуск до остановки production. Тяжёлый faster-whisper пока остаётся частью production.
+
+## nginx / TLS / эксплуатация
+
+Существующий nginx не меняется: proxy_pass на 127.0.0.1:8000, HTTPS.
+С Cloudflare использовать `nginx-thefootnotes-cloudflare.conf`, Origin Certificate,
+SSL/TLS **Full (strict)** и edge redirect HTTPS; SSH_HOST — адрес самого VPS.
+Без Cloudflare — `nginx-thefootnotes.conf` и сертификат certbot.
+Вход в приложение — Telegram или код, nginx basic-auth не нужен.
+
+- Логи: `journalctl -u thefootnotes -n 100 --no-pager`.
+- Readiness: `curl --fail http://127.0.0.1:8000/health/ready`.
+- Статус: `systemctl status thefootnotes --no-pager`.
+- Не включать несколько Uvicorn workers и не запускать второй poller с production token.
+- Staging: отдельная БД и отдельный Telegram bot token.
+- В GitHub включить персональные уведомления о failed Actions runs.

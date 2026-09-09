@@ -7,11 +7,18 @@ import os
 import tempfile
 
 _tmp = tempfile.mkdtemp(prefix="thefootnotes-tests-")
-os.environ.setdefault("DATA_DIR", _tmp)
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{_tmp}/test.db")
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:TEST-BOT-TOKEN")
-os.environ.setdefault("ALLOWED_USER_IDS", "")  # доступ всем — упрощает тесты
-os.environ.setdefault("ADMIN_TELEGRAM_ID", "999")
+os.environ.update(
+    DATA_DIR=_tmp,
+    DATABASE_URL=f"sqlite:///{_tmp}/test.db",
+    PYTHON_DOTENV_DISABLED="1",
+    TELEGRAM_BOT_TOKEN="123456:TEST-BOT-TOKEN",
+    BOT_ENABLED="false",
+    MIGRATE_ON_START="true",
+    ANTHROPIC_API_KEY="test",
+    OPENAI_API_KEY="test",
+    ALLOWED_USER_IDS="",
+    ADMIN_TELEGRAM_ID="999",
+)
 
 import pytest  # noqa: E402
 
