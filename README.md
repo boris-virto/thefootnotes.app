@@ -27,7 +27,7 @@
 ```bash
 cd thefootnotes
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 
 cp .env.example .env      # затем впиши ключи в .env
 
@@ -42,10 +42,12 @@ uvicorn app.main:app --reload --port 8000
 Полный пошаговый runbook — в [`deploy/DEPLOY.md`](deploy/DEPLOY.md). Кратко:
 
 - бот и дашборд крутятся как systemd-сервис под непривилегированным пользователем;
-- nginx отдаёт дашборд по HTTPS с паролем на домене `thefootnotes.app`;
+- nginx отдаёт дашборд по HTTPS на `thefootnotes.app`, вход — через Telegram или код;
 - данные (SQLite + файлы) лежат на реальном диске и не теряются;
-- каждый `git push` в `main` автоматически выкатывается на сервер (`.github/workflows/deploy.yml`);
-- адрес базы вынесен в `DATABASE_URL` — переезд на PostgreSQL не требует правок кода.
+- GitHub Actions проверяет PR и `main`: тесты, миграции и запуск приложения;
+- успешный `main` выпускается отдельным релизом с проверкой готовности и откатом (`.github/workflows/deploy.yml`);
+- база и вложения остаются в `/opt/thefootnotes/data`; systemd запускает код через `current`;
+- автоматическая процедура миграций и backup сейчас рассчитана на SQLite.
 
 ## Структура
 
