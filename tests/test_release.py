@@ -105,3 +105,15 @@ def test_archive_cannot_escape_release_directory(tmp_path):
     with pytest.raises(ValueError, match='Unsafe'):
         release.unpack(archive, tmp_path / 'release')
     assert not (tmp_path / 'escape').exists()
+
+
+def test_readiness_identifies_checker_and_requires_matching_sha(monkeypatch):
+    import json
+    def cloudflare(request, timeout):
+        assert request.get_header('User-agent') == 'thefootnotes-deploy/1.0'
+        assert request.get_header('Cache-control') == 'no-cache'
+        return io.BytesIO(json.dumps({'status': 'ok', 'release': SHA}).encode())
+    monkeypatch.setattr(release.urllib.request, 'urlopen', cloudflare)
+    monkeypatch.setattr(release.time, 'sleep', lambda _: None)
+    assert release.ready(SHA, attempts=1)
+    assert not release.ready(OLD, attempts=1)

@@ -34,7 +34,14 @@ def ready(sha: str, url='http://127.0.0.1:8000/health/ready', attempts=60):
         url = 'http://127.0.0.1:8000/login'
     for _ in range(attempts):
         try:
-            with urllib.request.urlopen(url, timeout=3) as response:
+            # Cloudflare rejects Python's default urllib agent on this origin.
+            # Identify our checker explicitly; keep certificate verification on.
+            request = urllib.request.Request(url, headers={
+                'User-Agent': 'thefootnotes-deploy/1.0',
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache',
+            })
+            with urllib.request.urlopen(request, timeout=3) as response:
                 if legacy:
                     return response.status == 200
                 result = json.load(response)
